@@ -1,0 +1,21 @@
+FROM eclipse-temurin:21-jdk-jammy
+
+ENV DEBIAN_FRONTEND=noninteractive
+
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends \
+        bash \
+        binutils \
+        ca-certificates \
+        coreutils \
+        curl \
+        file \
+        findutils \
+        grep \
+        python3 \
+        unzip \
+        wget \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /workspace
+

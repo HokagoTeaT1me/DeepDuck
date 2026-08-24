@@ -1,0 +1,2 @@
+"""Web scanner extension point."""
+

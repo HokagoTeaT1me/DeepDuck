@@ -1,0 +1,16 @@
+.git
+__pycache__/
+*.pyc
+.pytest_cache/
+.mypy_cache/
+workspace/
+dist/
+build/
+*.egg-info/
+.env
+.env.local
+.env.production
+*.pem
+*.key
+credentials
+secrets

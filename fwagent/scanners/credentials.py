@@ -1,0 +1,2 @@
+"""Credential scanner extension point."""
+

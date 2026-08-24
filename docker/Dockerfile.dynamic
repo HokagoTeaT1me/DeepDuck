@@ -1,0 +1,92 @@
+FROM python:3.12-slim-trixie
+
+ENV DEBIAN_FRONTEND=noninteractive
+ENV PYTHONDONTWRITEBYTECODE=1
+ENV PYTHONUNBUFFERED=1
+
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends \
+        binutils \
+        binfmt-support \
+        cpio \
+        curl \
+        file \
+        findutils \
+        git \
+        iproute2 \
+        iputils-ping \
+        lsof \
+        net-tools \
+        proot \
+        procps \
+        python3-pip \
+        qemu-system-arm \
+        qemu-system-mips \
+        qemu-user-static \
+        socat \
+        tcpdump \
+        unzip \
+        wget \
+        xz-utils \
+    && rm -rf /var/lib/apt/lists/*
+
+# FirmAE install is best-effort; the wrapper reports structured status if it is missing.
+RUN git clone --recursive --depth 1 https://github.com/pr0v3rbs/FirmAE /opt/FirmAE \
+    && cd /opt/FirmAE \
+    && (./download.sh || true) \
+    && (./install.sh || true)
+
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends \
+        arj \
+        bc \
+        binwalk \
+        busybox-static \
+        cabextract \
+        dmsetup \
+        fakeroot \
+        kpartx \
+        lhasa \
+        lzop \
+        mtd-utils \
+        netcat-openbsd \
+        nmap \
+        p7zip-full \
+        postgresql \
+        python3-bs4 \
+        python3-magic \
+        python3-requests \
+        sleuthkit \
+        snmp \
+        srecord \
+        squashfs-tools \
+        uml-utilities \
+        vlan \
+    && rm -rf /var/lib/apt/lists/*
+
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends qemu-utils \
+    && rm -rf /var/lib/apt/lists/*
+
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends fdisk e2fsprogs util-linux \
+    && rm -rf /var/lib/apt/lists/* \
+    && (ln -sf /usr/sbin/fdisk /sbin/fdisk || true)
+
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends ipxe-qemu \
+    && rm -rf /var/lib/apt/lists/*
+
+RUN pip install --no-cache-dir python-magic requests psycopg2-binary
+
+WORKDIR /app
+COPY . /app
+RUN mkdir -p /opt/fwagent \
+    && cp /app/docker/entrypoint-dynamic.sh /opt/fwagent/dynamic-entrypoint.sh \
+    && chmod +x /opt/fwagent/dynamic-entrypoint.sh \
+    && python /app/scripts/patch_binwalk_py312.py \
+    && pip install --no-cache-dir /opt/FirmAE/binwalk-2.3.4 \
+    && pip install --no-cache-dir .
+
+WORKDIR /work
+ENTRYPOINT ["/opt/fwagent/dynamic-entrypoint.sh"]

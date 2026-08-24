@@ -1,0 +1,46 @@
+services:
+  fwagent:
+    build: .
+    image: fwagent-round2:latest
+    network_mode: "none"
+    working_dir: /work
+    volumes:
+      - .:/work
+    mem_limit: 2g
+    pids_limit: 256
+    cpus: 2
+    entrypoint: ["fwagent"]
+  ghidra-base:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.base
+    image: fwagent-ghidra-base:latest
+  ghidra-worker:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.ghidra
+    image: fwagent-ghidra-worker:latest
+    network_mode: "none"
+    working_dir: /workspace
+    volumes:
+      - ./workspace:/workspace
+    mem_limit: 8g
+    pids_limit: 512
+    cpus: 4
+    entrypoint: ["entrypoint-ghidra"]
+  dynamic-worker:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.dynamic
+    image: fwagent-round3-dynamic:latest
+    network_mode: "bridge"
+    working_dir: /work
+    volumes:
+      - .:/work
+    mem_limit: 4g
+    cpus: 2
+    cap_add:
+      - NET_ADMIN
+    devices:
+      - /dev/net/tun
+    entrypoint: ["/opt/fwagent/dynamic-entrypoint.sh"]

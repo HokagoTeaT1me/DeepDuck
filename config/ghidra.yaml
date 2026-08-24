@@ -1,0 +1,46 @@
+runtime:
+  network: false
+  memory_limit: 8G
+  cpu_limit: 4
+  pids_limit: 512
+
+ghidra:
+  config_version: 0.1
+  home: /opt/ghidra
+  project_dir: /workspace/ghidra_projects
+  script_dir: /opt/fwagent/ghidra_scripts
+  java_heap: 4G
+
+  analysis:
+    timeout_seconds: 300
+    max_binary_size_mb: 100
+
+  scheduling:
+    max_parallel_jobs: 2
+    initial_binary_limit: 10
+    minimum_priority_score: 30
+
+  project:
+    persistent: false
+    delete_after_export: true
+
+  processor:
+    auto_detect: true
+    fallback_to_pipeline_arch: true
+
+  output:
+    functions: true
+    imports: true
+    exports: true
+    strings: true
+    callgraph: true
+
+  decompilation:
+    mode: on_demand
+    max_function_chars: 20000
+
+agent:
+  max_steps: 30
+  max_binary_analyses: 10
+  max_decompilations_per_binary: 20
+

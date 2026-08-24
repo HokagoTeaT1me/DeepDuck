@@ -1,0 +1,123 @@
+from __future__ import annotations
+
+import os
+from pathlib import Path
+
+from fwagent.tools.common import display_path, is_elf, read_prefix
+
+
+SCRIPT_EXTENSIONS = {".sh", ".py", ".lua", ".php", ".pl", ".cgi", ".asp"}
+WEB_EXTENSIONS = {".html", ".htm", ".js", ".css", ".php", ".cgi", ".asp", ".lua", ".json"}
+CONFIG_EXTENSIONS = {".conf", ".cfg", ".ini", ".json", ".xml", ".yaml", ".yml", ".properties"}
+CERT_EXTENSIONS = {".pem", ".crt", ".cer", ".der", ".key"}
+LIB_PATTERNS = (".so", ".so.")
+
+
+def inventory_filesystem(rootfs: str | Path) -> dict:
+    root = Path(rootfs).resolve()
+    counts = {
+        "total_files": 0,
+        "directories": 0,
+        "symlinks": 0,
+        "elf_files": 0,
+        "scripts": 0,
+        "config_files": 0,
+        "web_files": 0,
+        "certificates": 0,
+        "private_keys": 0,
+        "libraries": 0,
+    }
+    categories: dict[str, list[str]] = {
+        "elf": [],
+        "shell_scripts": [],
+        "python": [],
+        "lua": [],
+        "php": [],
+        "cgi": [],
+        "html_js": [],
+        "config": [],
+        "certificates": [],
+        "private_keys": [],
+        "libraries": [],
+    }
+
+    for current, dirnames, filenames in os.walk(root, followlinks=False):
+        current_path = Path(current)
+        counts["directories"] += len(dirnames)
+        counts["symlinks"] += sum(1 for name in dirnames + filenames if (current_path / name).is_symlink())
+        for filename in filenames:
+            path = current_path / filename
+            if path.is_symlink():
+                continue
+            rel = display_path(path, root)
+            suffix = path.suffix.lower()
+            counts["total_files"] += 1
+
+            if is_elf(path):
+                counts["elf_files"] += 1
+                categories["elf"].append(rel)
+                if any(part in path.name for part in LIB_PATTERNS):
+                    counts["libraries"] += 1
+                    categories["libraries"].append(rel)
+                continue
+
+            prefix = read_prefix(path, 128)
+            shebang = prefix.startswith(b"#!")
+            if suffix in SCRIPT_EXTENSIONS or shebang:
+                counts["scripts"] += 1
+                _append_script_category(categories, rel, suffix, prefix)
+
+            if suffix in CONFIG_EXTENSIONS or _looks_like_config_path(path, root):
+                counts["config_files"] += 1
+                categories["config"].append(rel)
+
+            if suffix in WEB_EXTENSIONS or _looks_like_web_path(path, root):
+                counts["web_files"] += 1
+                _append_web_category(categories, rel, suffix)
+
+            if suffix in CERT_EXTENSIONS:
+                counts["certificates"] += 1
+                categories["certificates"].append(rel)
+                if suffix == ".key":
+                    counts["private_keys"] += 1
+                    categories["private_keys"].append(rel)
+
+    return {**counts, "categories": categories}
+
+
+def _append_script_category(categories: dict[str, list[str]], rel: str, suffix: str, prefix: bytes) -> None:
+    first_line = prefix.decode("utf-8", errors="ignore").splitlines()[0:1]
+    shebang = first_line[0].lower() if first_line else ""
+    if suffix == ".py" or "python" in shebang:
+        categories["python"].append(rel)
+    elif suffix == ".lua" or "lua" in shebang:
+        categories["lua"].append(rel)
+    elif suffix == ".php" or "php" in shebang:
+        categories["php"].append(rel)
+    elif suffix == ".cgi":
+        categories["cgi"].append(rel)
+    else:
+        categories["shell_scripts"].append(rel)
+
+
+def _append_web_category(categories: dict[str, list[str]], rel: str, suffix: str) -> None:
+    if suffix == ".cgi":
+        categories["cgi"].append(rel)
+    elif suffix == ".php":
+        categories["php"].append(rel)
+    elif suffix == ".lua":
+        categories["lua"].append(rel)
+    elif suffix in {".html", ".htm", ".js", ".css"}:
+        categories["html_js"].append(rel)
+
+
+def _looks_like_config_path(path: Path, root: Path) -> bool:
+    rel_parts = path.absolute().relative_to(root).parts
+    return len(rel_parts) >= 2 and rel_parts[0] == "etc"
+
+
+def _looks_like_web_path(path: Path, root: Path) -> bool:
+    rel_parts = path.absolute().relative_to(root).parts
+    if not rel_parts:
+        return False
+    return rel_parts[0] in {"www", "htdocs", "web"} or "cgi-bin" in rel_parts

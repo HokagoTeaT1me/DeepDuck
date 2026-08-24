@@ -1,0 +1,185 @@
+dynamic:
+  backend: firmae
+
+  boot:
+    timeout_seconds: 300
+
+  network:
+    external_internet: false
+    probe_timeout_seconds: 5
+
+  runtime:
+    max_memory: 4G
+    max_cpu: 2
+
+  validation:
+    max_actions: 15
+    max_http_requests: 20
+    max_steps: 12
+    max_tool_calls: 20
+    max_requests: 5
+    timeout_seconds: 30
+    max_request_bytes: 4096
+    max_body_bytes: 2048
+    max_response_preview: 512
+    stop_on_side_effect: true
+    loopback_only: true
+
+  prioritization:
+    enabled: true
+    assessment_version: 4.1
+    runtime_capability_version: round4.1-local-deterministic
+
+    scoring:
+      evidence_weight: 0.30
+      feasibility_weight: 0.25
+      information_gain_weight: 0.25
+      security_relevance_weight: 0.20
+      cost_weight: 0.15
+      duplicate_penalty: 0.15
+      inconclusive_penalty: 0.10
+      already_validated_penalty: 0.70
+      blocked_penalty: 0.35
+      safety_penalty: 0.25
+
+    thresholds:
+      critical: 85
+      high: 70
+      medium: 50
+      minimum_validation_priority: 45
+      marginal_information_gain: 0.25
+
+    budget:
+      max_hypotheses: 3
+      max_tool_calls: 12
+      max_requests: 9
+      max_runtime_seconds: 180
+      max_runtime_boots: 2
+      max_repairs: 2
+      max_failures: 2
+      max_blocked_validations: 2
+
+  correlation:
+    enabled: true
+    graph_version: 4.2
+
+    confidence:
+      string_reference: 0.35
+      static_reference: 0.55
+      config_parse: 0.70
+      decompile: 0.75
+      runtime_observation: 0.92
+      runtime_confirmed: 0.95
+      inferred: 0.40
+      promotion_bonus: 0.15
+
+    filtering:
+      min_relationship_relevance: 0.25
+      max_path_depth: 5
+      max_context_nodes: 24
+      ignore_library_paths: true
+
+  attack_surface:
+    enabled: true
+    max_reachability_depth: 5
+    max_entries: 64
+    max_routes: 64
+    min_relationship_confidence: 0.50
+
+    confidence:
+      config_declared: 0.65
+      static_reference: 0.50
+      runtime_listener: 0.82
+      runtime_request: 0.90
+      application_response: 0.95
+
+    reachability:
+      propagate_relationships: routes_to,dispatches_to,communicates_with,spawns,handles,forwards_to,serves,provides_backend_for,connects_to
+
+    prioritization:
+      entry_reachability_weight: 0.10
+      runtime_confirmation_bonus: 4.0
+      unknown_entry_penalty: 0.12
+
+  taint:
+    enabled: true
+    max_call_depth: 4
+    max_paths: 32
+    max_sources: 64
+    max_sinks: 128
+    max_function_candidates: 64
+
+    confidence:
+      same_function: 0.62
+      direct_argument: 0.88
+      caller_parameter: 0.72
+      return_propagation: 0.70
+      runtime_handler: 0.18
+      runtime_sink: 0.95
+      unresolved_argument_penalty: 0.22
+      sanitizer_unknown_penalty: 0.12
+      same_component_candidate: 0.35
+
+    sinks:
+      command_execution: system,popen,execl,execle,execlp,execv,execve,execvp
+      unsafe_copy: strcpy,strcat,sprintf,vsprintf,gets
+      memory_copy: memcpy,memmove,strncpy,snprintf
+      file_write: fopen,open,write,fwrite
+      dynamic_load: dlopen
+
+    prioritization:
+      taint_path_weight: 0.08
+      sink_relevance_weight: 0.06
+      sanitizer_uncertainty_weight: 0.04
+      runtime_taint_weight: 0.05
+
+  synthesis:
+    enabled: true
+    generated_by: deterministic_synthesizer
+    provider_backed: false
+
+    evidence_threshold:
+      minimum_taint_level: L3_argument_propagation
+      minimum_path_confidence: 0.60
+      minimum_entry_confidence: 0.45
+      minimum_sink_confidence: 0.55
+      minimum_static_evidence_count: 1
+      minimum_security_relevance: 0.50
+      promotion_minimum_support: supported
+      max_candidates: 64
+      max_promotions: 16
+      max_findings: 32
+
+  investigation:
+    enabled: true
+    max_iterations: 5
+    max_total_validations: 3
+    max_total_requests: 10
+    max_total_tool_calls: 30
+    max_dynamic_seconds: 180
+    max_runtime_boots: 2
+
+    convergence:
+      enabled: true
+      no_progress_iterations: 2
+
+    stop:
+      min_priority: 45
+      min_information_gain: 0.25
+      max_inconclusive: 2
+      max_blocked: 2
+      max_failures: 2
+
+    recovery:
+      retry_validation_timeout: false
+      rebuild_stale_artifact: true
+      continue_after_blocked: true
+
+  shutdown:
+    always_stop_after_task: true
+
+dynamic_agent:
+  max_steps: 12
+  max_http_requests: 10
+  max_port_probes: 20
+  max_log_reads: 5
