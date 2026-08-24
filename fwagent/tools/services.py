@@ -88,7 +88,11 @@ def discover_web_surface(rootfs: str | Path) -> dict:
 
     for rel in WEB_ROOTS:
         candidate = root / rel
-        if candidate.exists():
+        try:
+            exists = candidate.exists()
+        except OSError:
+            exists = False
+        if exists:
             roots.append(display_path(candidate, root))
 
     for path in iter_files(root):

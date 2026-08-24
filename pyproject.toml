@@ -15,8 +15,8 @@ license = { text = "MIT" }
 dependencies = []
 
 [project.scripts]
+deepduck = "fwagent.cli:main"
 fwagent = "fwagent.cli:main"
 
 [tool.setuptools.packages.find]
 include = ["fwagent*"]
-

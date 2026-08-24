@@ -183,3 +183,18 @@ dynamic_agent:
   max_http_requests: 10
   max_port_probes: 20
   max_log_reads: 5
+
+product:
+  deep_static_analysis:
+    enabled: true
+    top_n: 10
+    max_targets: 20
+    dependency_expansion: true
+
+  advanced_pipeline:
+    correlation: true
+    surface: true
+    taint: true
+    synthesis: true
+    prioritization: true
+    investigation: true

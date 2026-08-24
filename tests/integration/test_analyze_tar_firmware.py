@@ -64,7 +64,7 @@ class AnalyzeTarFirmwareIntegrationTests(unittest.TestCase):
                 exit_code = main(["analyze", str(firmware), "--workspace", str(base / "workspace"), "--timeout", "30"])
 
             self.assertEqual(exit_code, 0)
-            self.assertIn("FirmwareAgent v0.1.0", stdout.getvalue())
+            self.assertIn("DeepDuck v", stdout.getvalue())
             self.assertIn("Architecture: mips", stdout.getvalue())
 
 

@@ -48,6 +48,11 @@ class AnalysisReport:
     remaining_problems: list[str]
     provider_status: dict[str, Any]
     artifact_index: list[dict[str, Any]]
+    pipeline_stages: list[dict[str, Any]] = field(default_factory=list)
+    coverage: dict[str, Any] = field(default_factory=dict)
+    validation_gaps: list[str] = field(default_factory=list)
+    taint_summary: dict[str, Any] = field(default_factory=dict)
+    priority_summary: dict[str, Any] = field(default_factory=dict)
     validation: dict[str, Any] = field(default_factory=dict)
     components: list[dict[str, Any]] = field(default_factory=list)
     attack_surface: list[dict[str, Any]] = field(default_factory=list)
@@ -75,6 +80,11 @@ class AnalysisReport:
             "findings": self.findings,
             "hypotheses": self.hypotheses,
             "validation": self.validation,
+            "pipeline_stages": self.pipeline_stages,
+            "coverage": self.coverage,
+            "validation_gaps": self.validation_gaps,
+            "taint": self.taint_summary,
+            "prioritization": self.priority_summary,
             "evidence_statistics": self.evidence_summary,
             "investigation": self.investigation_summary,
             "runtime_repairs": self.runtime_repairs,
@@ -133,6 +143,9 @@ class ReportGenerator:
         entries = self._load("surface/entry_points.json") or []
         graph = self._load("correlation/summary.json")
         graph_full = self._load("correlation/component_graph.json")
+        pipeline = self._load("pipeline_stages.json")
+        taint = self._load("taint/summary.json")
+        priority = self._load("prioritization/scheduler_state.json") or {"assessments": self._load("prioritization/assessment.json") or []}
         hypotheses = self._load("dynamic/hypotheses.json") or []
         evidence = self._load("dynamic/evidence/evidence.json") or []
         findings_payload = findings_payload or self._load("findings/findings.json") or {"findings": []}
@@ -170,6 +183,11 @@ class ReportGenerator:
             remaining_problems=self._remaining_problems(findings, blocked),
             provider_status={"provider_backed": False, "planner": "deterministic", "real_model_validation": "deferred"},
             artifact_index=[item.to_dict() for item in self._artifact_index()],
+            pipeline_stages=(pipeline.get("stages") if isinstance(pipeline, dict) else []) or [],
+            coverage=(pipeline.get("coverage") if isinstance(pipeline, dict) else {}) or {},
+            validation_gaps=(pipeline.get("validation_gaps") if isinstance(pipeline, dict) else []) or [],
+            taint_summary=taint if isinstance(taint, dict) else {},
+            priority_summary=priority if isinstance(priority, dict) else {},
             validation={"investigation": investigation.get("summary") or {}, "provider_backed": False},
             components=(graph_full.get("components") if isinstance(graph_full, dict) else []) or [],
             attack_surface=entries,
@@ -181,17 +199,146 @@ class ReportGenerator:
         path.write_text(json.dumps(model.to_dict(), indent=2, sort_keys=True) + "\n", encoding="utf-8")
         return path
 
+    def _stage_markdown(self, stages: list[dict[str, Any]]) -> list[str]:
+        if not stages:
+            return ["| not_recorded | skipped | 0 | 0 | 0 | 0 | 0 |"]
+        rows = []
+        for stage in stages:
+            rows.append(
+                "| {stage} | {status} | {processed} | {succeeded} | {failed} | {skipped} | {duration} |".format(
+                    stage=stage.get("stage") or "unknown",
+                    status=stage.get("status") or "unknown",
+                    processed=stage.get("items_processed", 0),
+                    succeeded=stage.get("items_succeeded", 0),
+                    failed=stage.get("items_failed", 0),
+                    skipped=stage.get("items_skipped", 0),
+                    duration=stage.get("duration", 0),
+                )
+            )
+        return rows
+
     def generate_markdown(self, model: AnalysisReport) -> Path:
         path = self.reports_dir / "report.md"
+        stage_rows = self._stage_markdown(model.pipeline_stages)
+        coverage = model.coverage or {}
         lines = [
             "# DeepDuck Firmware Security Analysis Report",
             "",
-            "## Executive Summary",
+            "## 1. Executive Summary",
             "",
             f"Task: `{model.metadata.get('task_id')}`",
             f"Status: `{model.metadata.get('analysis_status')}`",
             f"Findings: `{len(model.findings)}`",
             "Provider: deterministic (`provider_backed=false`, real model validation deferred)",
+            "",
+            "## 2. Analysis Coverage",
+            "",
+            f"- Canonical rootfs: `{coverage.get('canonical_rootfs') or 'not established'}`",
+            f"- Rootfs source: `{coverage.get('rootfs_source') or 'not established'}`",
+            f"- Rootfs validated: `{coverage.get('rootfs_validated', False)}`",
+            f"- Extraction stage: `{coverage.get('stage_extraction') or 'not recorded'}`",
+            f"- Inventory stage: `{coverage.get('stage_rootfs_inventory') or 'not recorded'}`",
+            f"- Static target stage: `{coverage.get('stage_static_target_selection') or 'not recorded'}`",
+            f"- Ghidra stage: `{coverage.get('stage_ghidra_analysis') or 'not recorded'}`",
+            f"- Rootfs files: `{coverage.get('rootfs_files', 0)}`",
+            f"- ELF binaries: `{coverage.get('elf_binaries', 0)}`",
+            f"- Web files: `{coverage.get('web_files', 0)}`",
+            f"- Ghidra scheduled: `{coverage.get('ghidra_targets_scheduled', 0)}`",
+            f"- Real Ghidra completed: `{coverage.get('real_ghidra_completed', 0)}`",
+            "",
+            "| Stage | Status | Processed | Succeeded | Failed | Skipped | Duration(s) |",
+            "| --- | --- | ---: | ---: | ---: | ---: | ---: |",
+            *stage_rows,
+            "",
+            "## 3. Final Findings",
+            "",
+        ]
+        if not model.findings:
+            lines.append("No final findings were promoted from canonical evidence.")
+        for finding in model.findings:
+            lines.extend(self._finding_markdown(finding))
+        lines.extend(
+            [
+                "",
+                "## 4. Firmware Overview",
+                "",
+                f"- File: `{model.firmware_summary.get('filename') or 'unknown'}`",
+                f"- SHA256: `{model.firmware_summary.get('sha256') or 'unknown'}`",
+                f"- Type: `{model.firmware_summary.get('file_type') or 'unknown'}`",
+                "",
+                "## 5. Extraction & Rootfs",
+                "",
+                f"- Extraction mode: `{coverage.get('extraction_method') or 'not established'}`",
+                f"- Canonical rootfs marker: `artifacts/rootfs.json`",
+                f"- Extraction artifact: `artifacts/extraction.json`",
+                f"- Rootfs validation reason: `{coverage.get('rootfs_validation_reason') or 'not established'}`",
+                "",
+                "## 6. Static Target Selection",
+                "",
+                f"- Target candidates: `{coverage.get('static_targets', 0)}`",
+                f"- Deep static enabled: `{coverage.get('deep_static_enabled', False)}`",
+                "",
+                "## 7. Ghidra Analysis",
+                "",
+                f"- Scheduled: `{coverage.get('ghidra_targets_scheduled', 0)}`",
+                f"- Completed with real Ghidra: `{coverage.get('real_ghidra_completed', 0)}`",
+                f"- Fallback/blocked: `{coverage.get('ghidra_fallback_or_failed', 0)}`",
+                "",
+                "## 8. Component Correlation",
+                "",
+                f"- Components: `{len(model.components) or model.component_summary.get('total_components', 0)}`",
+                f"- Relationships: `{model.component_summary.get('total_relationships', 0)}`",
+                "",
+                "## 9. Attack Surface",
+                "",
+                f"- Entry points: `{len(model.attack_surface)}`",
+                f"- Summary: `{model.attack_surface_summary.get('entry_points', model.attack_surface_summary.get('total_entry_points', 'not established'))}`",
+                "",
+                "## 10. Taint & Hypotheses",
+                "",
+                f"- Taint sources: `{model.taint_summary.get('sources', model.taint_summary.get('total_sources', 0))}`",
+                f"- Taint sinks: `{model.taint_summary.get('sinks', model.taint_summary.get('total_sinks', 0))}`",
+                f"- Hypotheses: `{len(model.hypotheses)}`",
+                "",
+                "## 11. Prioritization & Investigation",
+                "",
+                f"- Prioritized hypotheses: `{len(model.priority_summary.get('assessments') or []) or model.priority_summary.get('total_assessments', 0)}`",
+                f"- Iterations: `{model.investigation_summary.get('iterations', 0)}`",
+                f"- Stop reason: `{model.investigation_summary.get('stop_reason') or 'not_executed'}`",
+                "",
+                "## 12. Dynamic Validation",
+                "",
+                f"- Blocked items: `{len(model.blocked_items)}`",
+                f"- Runtime repair artifacts: `{len(model.runtime_repairs)}`",
+                f"- Validation gaps: `{len(model.validation_gaps)}`",
+            ]
+        )
+        for gap in model.validation_gaps:
+            lines.append(f"- Gap: {gap}")
+        lines.extend(
+            [
+                "",
+                "## 13. Safety / Scope Notes",
+                "",
+                "- Reachability does not imply exploitability.",
+                "- Candidate findings require validation.",
+                "- Mock/simulation evidence is excluded from canonical findings.",
+                "- Model-assisted commentary is non-canonical until provider-backed validation is implemented.",
+                "- No public target scanning was performed.",
+                "",
+                "## 14. Artifacts",
+                "",
+            ]
+        )
+        for artifact in model.artifact_index:
+            lines.append(f"- `{artifact.get('path')}` ({artifact.get('type')}): {artifact.get('description')} — exists={artifact.get('exists')}")
+        path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+        return path
+
+    def _legacy_generate_markdown_unused(self, model: AnalysisReport) -> Path:
+        path = self.reports_dir / "report.md"
+        lines = [
+            "# DeepDuck Firmware Security Analysis Report",
             "",
             "## Analysis Scope",
             "",
@@ -276,6 +423,7 @@ class ReportGenerator:
 
     def generate_html(self, model: AnalysisReport) -> Path:
         path = self.reports_dir / "report.html"
+        coverage = model.coverage or {}
         finding_rows = "\n".join(
             f"<tr><td>{html.escape(item.get('finding_id',''))}</td><td>{html.escape(item.get('title',''))}</td><td><span class='badge'>{html.escape(item.get('status',''))}</span></td><td>{html.escape(item.get('severity_hint','unknown'))}</td><td>{item.get('confidence',0)}</td></tr>"
             for item in model.findings
@@ -285,6 +433,11 @@ class ReportGenerator:
             f"<tr><td>{html.escape(str(item.get('entry_id') or item.get('id') or ''))}</td><td>{html.escape(str(item.get('entry_type') or item.get('type') or ''))}</td><td>{html.escape(str(item.get('component_id') or item.get('target_component_id') or ''))}</td></tr>"
             for item in model.attack_surface[:50]
         )
+        stage_rows = "\n".join(
+            f"<tr><td>{html.escape(str(item.get('stage')))}</td><td>{html.escape(str(item.get('status')))}</td><td>{html.escape(str(item.get('items_processed', 0)))}</td><td>{html.escape(str(item.get('items_succeeded', 0)))}</td><td>{html.escape(str(item.get('items_failed', 0)))}</td><td>{html.escape(str(item.get('duration', 0)))}</td></tr>"
+            for item in model.pipeline_stages
+        )
+        gaps = "".join(f"<li>{html.escape(str(item))}</li>" for item in model.validation_gaps)
         timeline = "\n".join(f"<li>Iteration {html.escape(str(item.get('iteration')))}: {html.escape(str(item.get('action')))} {html.escape(str(item.get('target') or 'none'))}</li>" for item in model.timeline)
         html_text = f"""<!doctype html>
 <html lang="en">
@@ -313,6 +466,17 @@ code {{ background: #e2e8f0; padding: .1rem .25rem; border-radius: 4px; }}
 <div class="card"><strong>Findings</strong><br>{len(model.findings)}</div>
 <div class="card"><strong>Provider</strong><br>deterministic / provider_backed=false</div>
 </div>
+<h2>Analysis Coverage</h2>
+<p>Canonical rootfs: <code>{html.escape(str(coverage.get('canonical_rootfs') or 'not established'))}</code></p>
+<p>Rootfs source: <code>{html.escape(str(coverage.get('rootfs_source') or 'not established'))}</code>; validated: <code>{html.escape(str(coverage.get('rootfs_validated', False)))}</code></p>
+<p>Extraction / Inventory / Target / Ghidra: <code>{html.escape(str(coverage.get('stage_extraction') or 'not recorded'))}</code> / <code>{html.escape(str(coverage.get('stage_rootfs_inventory') or 'not recorded'))}</code> / <code>{html.escape(str(coverage.get('stage_static_target_selection') or 'not recorded'))}</code> / <code>{html.escape(str(coverage.get('stage_ghidra_analysis') or 'not recorded'))}</code></p>
+<div class="cards">
+<div class="card"><strong>Rootfs Files</strong><br>{html.escape(str(coverage.get('rootfs_files', 0)))}</div>
+<div class="card"><strong>ELF Binaries</strong><br>{html.escape(str(coverage.get('elf_binaries', 0)))}</div>
+<div class="card"><strong>Ghidra Scheduled</strong><br>{html.escape(str(coverage.get('ghidra_targets_scheduled', 0)))}</div>
+<div class="card"><strong>Real Ghidra</strong><br>{html.escape(str(coverage.get('real_ghidra_completed', 0)))}</div>
+</div>
+<table><thead><tr><th>Stage</th><th>Status</th><th>Processed</th><th>Succeeded</th><th>Failed</th><th>Duration(s)</th></tr></thead><tbody>{stage_rows}</tbody></table>
 <h2>Finding Table</h2>
 <table><thead><tr><th>ID</th><th>Title</th><th>Status</th><th>Severity Hint</th><th>Confidence</th></tr></thead><tbody>{finding_rows}</tbody></table>
 <h2>Finding Details</h2>
@@ -325,6 +489,8 @@ code {{ background: #e2e8f0; padding: .1rem .25rem; border-radius: 4px; }}
 <ul>{timeline or '<li>Not executed.</li>'}</ul>
 <h2>Evidence Counts</h2>
 <p>Total: <code>{model.evidence_summary.get('total', 0)}</code>, Dynamic: <code>{model.evidence_summary.get('dynamic', 0)}</code></p>
+<h2>Validation Gaps</h2>
+<ul>{gaps or '<li>No validation gaps recorded.</li>'}</ul>
 <h2>Safety / Scope Notes</h2>
 <ul><li>Candidate findings require validation.</li><li>Mock evidence is excluded from canonical findings.</li><li>Real model validation deferred.</li></ul>
 </body>
@@ -388,12 +554,19 @@ code {{ background: #e2e8f0; padding: .1rem .25rem; border-radius: 4px; }}
 
     def _artifact_index(self) -> list[ArtifactIndexItem]:
         specs = [
+            ("pipeline_stages", "pipeline_stages.json", "Integrated pipeline stage ledger"),
+            ("extraction", "artifacts/extraction.json", "Extraction attempts and canonical rootfs selection"),
+            ("canonical_rootfs", "artifacts/rootfs.json", "Canonical root filesystem selection"),
             ("static_analysis", "reports/analysis.json", "Static firmware analysis report"),
+            ("ghidra_targets", "ghidra/targets.json", "Selected deep static analysis targets"),
+            ("ghidra_summary", "ghidra/analysis_summary.json", "Ghidra analysis scheduling and ingestion summary"),
             ("component_graph", "correlation/component_graph.json", "Cross-component graph"),
             ("surface", "surface/attack_surface_summary.json", "Attack surface summary"),
             ("taint", "taint/summary.json", "Input-to-sink correlation summary"),
+            ("prioritization", "prioritization/scheduler_state.json", "Hypothesis prioritization scheduler state"),
             ("hypotheses", "hypotheses/synthesis_analysis.json", "Hypothesis synthesis artifact"),
             ("investigation", "investigation/summary.json", "Autonomous investigation summary"),
+            ("service_profile_lighttpd", "dynamic/services/lighttpd/launch_profile.json", "Reconstructed lighttpd service startup profile"),
             ("dynamic_evidence", "dynamic/evidence/evidence.json", "Canonical dynamic evidence"),
             ("runtime_logs", "dynamic/logs", "Runtime logs directory"),
             ("findings", "findings/findings.json", "Final findings"),

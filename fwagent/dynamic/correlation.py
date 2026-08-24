@@ -456,6 +456,7 @@ class ComponentGraphBuilder:
         report = self._load_report()
         self._ingest_binaries(report)
         self._ingest_services(report)
+        self._ingest_service_profiles()
         self._ingest_lighttpd_profile()
         self._ingest_fastcgi_runtime()
         self._ingest_hypothesis_context()
@@ -593,8 +594,6 @@ class ComponentGraphBuilder:
             path = str(binary.get("path") or "")
             if not path or self._noise_path(path):
                 continue
-            if "lighttpd" not in path and "device_manager" not in path and "ret2text" not in path:
-                continue
             component_type = "fastcgi" if path.endswith(".fcgi") else "binary"
             component = self._component(component_type, Path(path).name, path=path, architecture=binary.get("architecture"), metadata={"linked_libraries": binary.get("linked_libraries", [])})
             for library in binary.get("linked_libraries", [])[:12]:
@@ -602,13 +601,48 @@ class ComponentGraphBuilder:
                     continue
                 lib = self._component("library", str(library), path=str(library), confidence=0.6)
                 self._relationship(component, lib, "uses_library", "static_reference", [f"BIN:{path}"], 0.55, f"{path} links {library}")
+            for symbol in binary.get("dangerous_symbols", [])[:16]:
+                function = self._component(
+                    "function",
+                    str(symbol),
+                    binary_id=component.component_id,
+                    metadata={"symbol_role": "dangerous_import_or_reference"},
+                    confidence=0.62,
+                )
+                self._relationship(component, function, "references", "static_reference", [f"BIN:{path}"], 0.56, f"{path} references {symbol}", relevance=0.72)
+            ghidra = binary.get("ghidra") if isinstance(binary.get("ghidra"), dict) else {}
+            for function_name in ghidra.get("functions", [])[:24] if isinstance(ghidra.get("functions"), list) else []:
+                function = self._component("function", str(function_name), binary_id=component.component_id, confidence=0.68)
+                self._relationship(component, function, "contains", "ghidra_analysis", [f"GHIDRA:{path}"], 0.64, f"Ghidra identified function {function_name}", relevance=0.62)
 
     def _ingest_services(self, report: dict[str, Any]) -> None:
         for service in report.get("services", []) if isinstance(report.get("services"), list) else []:
             name = str(service.get("name") or "")
-            if not name or name != "lighttpd":
+            if not name:
                 continue
-            self._component("service", name, service_name=name, metadata=service)
+            service_component = self._component("service", name, service_name=name, metadata=service)
+            binary_path = str(service.get("binary") or service.get("path") or "")
+            if binary_path:
+                binary = self._component("binary", Path(binary_path).name, path=binary_path, confidence=0.68)
+                self._relationship(service_component, binary, "starts", "static_reference", [f"SERVICE:{name}"], 0.62, f"service inventory links {name} to {binary_path}")
+
+    def _ingest_service_profiles(self) -> None:
+        services_dir = self.workspace.dynamic_dir / "services"
+        if not services_dir.exists():
+            return
+        for profile_path in services_dir.glob("*/launch_profile.json"):
+            if profile_path.parent.name == "lighttpd":
+                continue
+            profile = json.loads(profile_path.read_text(encoding="utf-8"))
+            service_name = str(profile.get("service") or profile_path.parent.name)
+            service = self._component("service", service_name, service_name=service_name, metadata={"profile": "launch_profile"})
+            binary_path = str(profile.get("binary") or "")
+            if binary_path:
+                binary = self._component("binary", Path(binary_path).name, path=binary_path, confidence=0.72)
+                self._relationship(service, binary, "starts", "init_script", [f"ART:{service_name}-launch-profile"], 0.72, f"init/service profile starts {service_name} binary", artifact_path=str(profile_path))
+            if profile.get("startup_source"):
+                init = self._component("init_script", Path(str(profile["startup_source"])).name, path=str(profile["startup_source"]))
+                self._relationship(init, service, "starts", "init_script", [f"ART:{service_name}-launch-profile"], 0.68, "init script starts service", artifact_path=str(profile_path))
 
     def _ingest_lighttpd_profile(self) -> None:
         profile_path = self.workspace.dynamic_dir / "services" / "lighttpd" / "launch_profile.json"
@@ -681,6 +715,10 @@ class ComponentGraphBuilder:
             self._relationship(fastcgi, response, "serves", "runtime_http", runtime_evidence_ids, 0.95, "FastCGI backend produced application-level response", static_or_dynamic="dynamic", status="confirmed", provenance="real_runtime_observation", runtime_real=True, relevance=1.0)
 
     def _ingest_hypothesis_context(self) -> None:
+        report = self._load_report()
+        firmware_name = str((report.get("firmware") or {}).get("filename") or "").lower()
+        if firmware_name and "ret2text" not in firmware_name:
+            return
         hypotheses = self.workspace.load_hypotheses()
         for hypothesis in hypotheses:
             if "ret2text" in hypothesis.title.lower() or "ret2text" in hypothesis.id.lower():

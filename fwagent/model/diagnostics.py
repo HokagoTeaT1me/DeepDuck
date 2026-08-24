@@ -203,7 +203,7 @@ class ProviderSmokeRunner:
         status.connection = "pass"
         status.structured_output = "pass"
         status.tool_calling = tool
-        status.details = "provider completion, structured output, and FWAgent JSON tool protocol smoke passed"
+        status.details = "provider completion, structured output, and DeepDuck JSON tool protocol smoke passed"
         if status.metadata:
             status.metadata.tool_calling_supported = tool.supported
         return status
@@ -236,7 +236,7 @@ class ProviderSmokeRunner:
                     "role": "system",
                     "content": "You can request exactly one safe tool by returning JSON only. Available tool: validation.get_status. Return {\"tool\":\"validation.get_status\",\"arguments\":{}} when useful.",
                 },
-                {"role": "user", "content": "Check FWAgent validation status using the available tool."},
+                {"role": "user", "content": "Check DeepDuck validation status using the available tool."},
             ],
             max_tokens=384,
             validator=lambda content: _extract_json(content).get("tool") == "validation.get_status",

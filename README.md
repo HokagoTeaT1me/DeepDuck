@@ -7,8 +7,7 @@
 [![Status](https://img.shields.io/badge/status-active%20research-orange)](#roadmap)
 [![Reports](https://img.shields.io/badge/reports-Markdown%20%7C%20HTML%20%7C%20JSON-purple)](#sample-report)
 
-**DeepDuck** stands for **Deep Exploration and Evaluation Platform for Device
-Understanding, Correlation, and Knowledge**. It is a deterministic-first IoT
+**DeepDuck** stands for **Deep Exploration and Evaluation Platform for Device Understanding, Correlation, and Knowledge**. It is a deterministic-first IoT
 firmware analysis framework that turns a firmware image into a reproducible
 workspace containing extraction evidence, filesystem inventory, service
 discovery, binary triage, dynamic reachability artifacts, and final reports.
@@ -31,7 +30,7 @@ separate confirmed facts from candidate risks.
 
 ### For All Users
 
-- **🧭 One-command analysis**: Run `fwagent analyze` and get a task workspace with reports.
+- **🧭 One-command analysis**: Run `deepduck analyze` and get a task workspace with reports.
 - **📦 Safe extraction workspace**: Copy firmware into an isolated task directory before processing.
 - **📊 Multi-format reports**: Emit Markdown, HTML, and JSON final reports.
 - **🔐 Safety-first posture**: No public target scanning, no exploit execution, and no arbitrary agent shell tools.
@@ -65,8 +64,8 @@ pip install -e .
 **Option 2: Run from source**
 
 ```bash
-python -m fwagent doctor
-python -m fwagent analyze path/to/firmware.bin
+deepduck doctor
+deepduck analyze path/to/firmware.bin
 ```
 
 **Option 3: Docker runtime**
@@ -74,7 +73,7 @@ python -m fwagent analyze path/to/firmware.bin
 ```bash
 docker build -t fwagent-round2:latest .
 docker run --rm --network none -v "$PWD:/work" -w /work \
-  fwagent-round2:latest analyze /work/path/to/firmware.bin --workspace /work/workspace
+  fwagent-round2:latest deepduck analyze /work/path/to/firmware.bin --workspace /work/workspace
 ```
 
 ### First Run
@@ -82,7 +81,7 @@ docker run --rm --network none -v "$PWD:/work" -w /work \
 #### 1. Analyze a firmware image
 
 ```bash
-python -m fwagent analyze samples/firmware.bin \
+deepduck analyze samples/firmware.bin \
   --workspace workspace \
   --task-id demo-firmware \
   --max-iterations 3
@@ -91,13 +90,13 @@ python -m fwagent analyze samples/firmware.bin \
 #### 2. Show task status
 
 ```bash
-python -m fwagent status demo-firmware --workspace workspace
+deepduck status demo-firmware --workspace workspace
 ```
 
 #### 3. Regenerate final reports
 
 ```bash
-python -m fwagent report demo-firmware \
+deepduck report demo-firmware \
   --workspace workspace \
   --format md,html,json
 ```
@@ -119,7 +118,7 @@ python -m fwagent report demo-firmware \
 ### Static-only triage
 
 ```bash
-python -m fwagent analyze firmware.bin \
+deepduck analyze firmware.bin \
   --workspace workspace \
   --task-id static-triage \
   --static-only
@@ -128,7 +127,7 @@ python -m fwagent analyze firmware.bin \
 ### Agent-assisted investigation
 
 ```bash
-python -m fwagent investigate static-triage \
+deepduck investigate static-triage \
   --workspace workspace \
   --binary /usr/sbin/lighttpd \
   --max-steps 10 \
@@ -139,7 +138,7 @@ python -m fwagent investigate static-triage \
 ### Model provider smoke test
 
 ```bash
-python -m fwagent model check
+deepduck model check
 ```
 
 Model configuration is read from environment variables or a local `.env` file:
@@ -157,8 +156,8 @@ logs, and prompts unless a specific task requires a transient API call.
 ### Ghidra environment check
 
 ```bash
-python -m fwagent ghidra check
-python -m fwagent doctor
+deepduck ghidra check
+deepduck doctor
 ```
 
 ### Docker validation
@@ -166,7 +165,7 @@ python -m fwagent doctor
 ```bash
 docker build -t fwagent-round2:latest .
 docker run --rm --network none -v "$PWD:/work" -w /work \
-  fwagent-round2:latest analyze /work/firmware.bin \
+  fwagent-round2:latest deepduck analyze /work/firmware.bin \
   --workspace /work/workspace \
   --task-id docker-demo
 ```
@@ -277,3 +276,4 @@ Recent local validation:
 ## 📜 License
 
 This project is currently configured as MIT in `pyproject.toml`.
+

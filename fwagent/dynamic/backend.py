@@ -1481,7 +1481,7 @@ def _lighttpd_external_fastcgi(
     output.extend(
         [
             "",
-            "# FWAgent Round 3.5 runtime reconstruction: external FastCGI child parity.",
+            "# DeepDuck Round 3.5 runtime reconstruction: external FastCGI child parity.",
             "fastcgi.server = (",
             f'  "{endpoint}" => ((',
         ]

@@ -36,20 +36,22 @@ from fwagent.tools.ghidra_api import BinaryToolAPI
 
 
 def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(prog="fwagent", description="IoT firmware analysis pipeline")
-    parser.add_argument("--version", action="version", version=f"fwagent {__version__}")
+    parser = argparse.ArgumentParser(prog="deepduck", description="DeepDuck firmware security analysis pipeline")
+    parser.add_argument("--version", action="version", version=f"deepduck {__version__}")
     subparsers = parser.add_subparsers(dest="command", required=True)
 
-    doctor = subparsers.add_parser("doctor", help="Check Docker/container analysis environment")
+    doctor = subparsers.add_parser("doctor", help="Check DeepDuck Docker/container analysis environment")
     doctor.add_argument("--dynamic", action="store_true", help="Include dynamic worker checks")
 
-    analyze = subparsers.add_parser("analyze", help="Analyze a firmware file")
+    analyze = subparsers.add_parser("analyze", help="Run DeepDuck firmware analysis")
     analyze.add_argument("firmware_file", help="Firmware image or archive to analyze")
     analyze.add_argument("--workspace", default="workspace", help="Workspace root directory")
     analyze.add_argument("--timeout", type=int, default=600, help="Extraction timeout in seconds")
     analyze.add_argument("--task-id", default=None, help="Explicit task id to create or resume")
     analyze.add_argument("--resume", action="store_true", help="Resume an existing task id")
     analyze.add_argument("--report-format", default="json,md,html", help="Comma-separated report formats: json,md,html")
+    analyze.add_argument("--fast", action="store_true", help="Run fast triage without deep static or runtime validation")
+    analyze.add_argument("--deep", action="store_true", help="Prefer deeper static target coverage when available")
     analyze.add_argument("--static-only", action="store_true", help="Run static analysis and final reports without dynamic investigation")
     analyze.add_argument("--no-dynamic", action="store_true", help="Build static Round 4 artifacts but skip runtime validation")
     analyze.add_argument("--max-iterations", type=int, default=None, help="Bound autonomous investigation iterations")
@@ -545,6 +547,8 @@ def main(argv: list[str] | None = None) -> int:
             task_id=args.task_id,
             resume=args.resume,
             report_formats=formats,
+            fast=args.fast,
+            deep=args.deep,
             static_only=args.static_only,
             no_dynamic=args.no_dynamic,
             max_iterations=args.max_iterations,
@@ -1913,7 +1917,7 @@ def _format_pipeline_summary(result: dict) -> str:
     duration = result.get("duration") or {}
     platform = result.get("platform") or {}
     lines = [
-        "FirmwareAgent v0.1.0",
+        f"DeepDuck v{__version__}",
         "",
         "DeepDuck Analysis Complete" if result.get("success") else "DeepDuck Analysis Failed",
         "",
@@ -2024,7 +2028,7 @@ def _format_model_doctor(status: dict) -> str:
     metadata = status.get("metadata") or {}
     tool = status.get("tool_calling") or {}
     lines = [
-        "FWAgent Model Provider Check",
+        "DeepDuck Model Provider Check",
         "",
         f"Provider: {status.get('provider') or 'missing'}",
         f"Model: {status.get('model') or 'missing'}",

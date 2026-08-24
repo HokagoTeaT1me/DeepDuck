@@ -479,6 +479,41 @@ class AttackSurfaceBuilder:
                     relationship_ids=relationship_ids,
                 )
             )
+        for generic_profile_path in (self.workspace.dynamic_dir / "services").glob("*/launch_profile.json") if (self.workspace.dynamic_dir / "services").exists() else []:
+            if generic_profile_path.parent.name == "lighttpd":
+                continue
+            try:
+                generic_profile = json.loads(generic_profile_path.read_text(encoding="utf-8"))
+            except json.JSONDecodeError:
+                continue
+            service_name = str(generic_profile.get("service") or generic_profile_path.parent.name)
+            generic_service_id = self.graph.resolve_component_id(service_name)
+            generic_config = generic_profile.get("config") if isinstance(generic_profile.get("config"), dict) else {}
+            generic_ports = []
+            for key in ("server.port", "port", "listen_port"):
+                if generic_config.get(key):
+                    generic_ports.append(_safe_int(generic_config.get(key)))
+            for generic_port in sorted({item for item in generic_ports if item}):
+                entries.append(
+                    EntryPoint(
+                        entry_id=f"EP-SERVICE-{_surface_slug(service_name)}-{generic_port}",
+                        entry_type="service_port",
+                        name=f"{service_name} TCP {generic_port}",
+                        protocol="tcp",
+                        transport="tcp",
+                        port=generic_port,
+                        service=service_name,
+                        component_id=generic_service_id,
+                        source="config_declared",
+                        static_or_dynamic="static",
+                        exposure_scope="local_network",
+                        authentication_known=None,
+                        runtime_confirmed=False,
+                        confidence=self.config.attack_surface.confidence.config_declared,
+                        evidence_ids=[f"ART:{service_name}-launch-profile"],
+                        relationship_ids=self._relationship_ids_for_component(generic_service_id, {"listens_on"}) if generic_service_id else [],
+                    )
+                )
         listener = (runtime.get("backend_child") or {}).get("listener") if runtime else {}
         if handler_id and listener:
             entries.append(
@@ -526,7 +561,9 @@ class AttackSurfaceBuilder:
                     relationship_ids=self._relationship_ids_for_component(socket_component.component_id, {"communicates_with"}),
                 )
             )
-        ret2text_id = self.graph.resolve_component_id("ret2text")
+        report = self._load_report()
+        firmware_name = str((report.get("firmware") or {}).get("filename") or "").lower()
+        ret2text_id = self.graph.resolve_component_id("ret2text") if not firmware_name or "ret2text" in firmware_name else None
         if ret2text_id:
             evidence = sorted({evidence_id for hypothesis in self.hypotheses if "ret2text" in (hypothesis.id + hypothesis.title).lower() for evidence_id in hypothesis.evidence_ids})
             entries.append(
@@ -880,6 +917,12 @@ class AttackSurfaceBuilder:
             ids.append("ART:fastcgi-runtime")
         return sorted(set(ids))
 
+    def _load_report(self) -> dict[str, Any]:
+        try:
+            return self.workspace.load_report()
+        except Exception:  # noqa: BLE001
+            return {}
+
     def _relationship_ids_between(self, component_ids: set[str | None]) -> list[str]:
         known = {item for item in component_ids if item}
         return sorted(
@@ -940,6 +983,10 @@ def _safe_int(value: Any) -> int | None:
         return int(value)
     except (TypeError, ValueError):
         return None
+
+
+def _surface_slug(value: str) -> str:
+    return "".join(ch if ch.isalnum() else "-" for ch in value).strip("-") or "service"
 
 
 def _input_description(entry: EntryPoint) -> str:

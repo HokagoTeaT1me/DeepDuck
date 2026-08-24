@@ -33,7 +33,7 @@ CHECKS = [
 
 
 def run_doctor(*, dynamic: bool = False) -> tuple[int, str]:
-    lines = ["FWAgent Environment Check", ""]
+    lines = ["DeepDuck Environment Check", ""]
     failed = False
     for check in CHECKS:
         ok, detail = _run_check(check)

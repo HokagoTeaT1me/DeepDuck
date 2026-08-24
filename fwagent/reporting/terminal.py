@@ -13,7 +13,7 @@ def format_terminal_report(report: dict, report_path: str | None = None) -> str:
     security = report.get("security_candidates", [])
     web = report.get("web", {})
 
-    lines: list[str] = [f"FirmwareAgent v{__version__}", ""]
+    lines: list[str] = [f"DeepDuck v{__version__}", ""]
     lines.extend(
         [
             "Target",
@@ -81,4 +81,3 @@ def _confidence_label(confidence: float) -> str:
     if confidence >= 0.65:
         return "MED"
     return "LOW"
-

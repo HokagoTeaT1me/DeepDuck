@@ -783,6 +783,29 @@ class TaintAnalysisBuilder:
     def _discover_sources(self) -> list[InputSourceDescriptor]:
         entries = {item["entry_id"]: item for item in self.surface.get("entry_points", [])}
         sources: list[InputSourceDescriptor] = []
+        for entry in entries.values():
+            entry_id = str(entry.get("entry_id") or "")
+            protocol = str(entry.get("protocol") or entry.get("entry_type") or "").lower()
+            if entry_id in {"EP-HTTPS-lighttpd-device-manager", "EP-LOOPBACK-FCGI-44171", "EP-STDIN-ret2text"}:
+                continue
+            if protocol not in {"http", "https", "fastcgi", "tcp", "udp"} and "http" not in entry_id.lower():
+                continue
+            sources.append(
+                InputSourceDescriptor(
+                    source_id=f"SRC-{_slug(entry_id)}-REQUEST",
+                    source_type="tcp_stream" if protocol in {"http", "https", "tcp", "fastcgi"} else "udp_datagram" if protocol == "udp" else "unknown",
+                    entry_point_id=entry_id,
+                    component_id=entry.get("handler_component_id") or entry.get("component_id"),
+                    function_name=str(entry.get("name") or "request handler"),
+                    parameter_name="request",
+                    protocol=entry.get("protocol"),
+                    origin="network_or_service_entry",
+                    runtime_confirmed=bool(entry.get("runtime_confirmed")),
+                    evidence_ids=entry.get("evidence_ids", []),
+                    confidence=float(entry.get("confidence", 0.55)),
+                    provenance="real_runtime_observation" if entry.get("runtime_confirmed") else "real_static_analysis",
+                )
+            )
         fastcgi_entry = entries.get("EP-HTTPS-lighttpd-device-manager")
         if fastcgi_entry:
             for source_id, source_type, parameter_name, origin, confidence in (
@@ -823,7 +846,9 @@ class TaintAnalysisBuilder:
                     provenance="real_runtime_observation",
                 )
             )
-        ret_entry = entries.get("EP-STDIN-ret2text")
+        report = self._load_report()
+        firmware_name = str((report.get("firmware") or {}).get("filename") or "").lower()
+        ret_entry = entries.get("EP-STDIN-ret2text") if not firmware_name or "ret2text" in firmware_name else None
         if ret_entry:
             sources.append(
                 InputSourceDescriptor(
@@ -848,16 +873,17 @@ class TaintAnalysisBuilder:
         report = self._load_report()
         for binary in report.get("binaries", []) if isinstance(report.get("binaries"), list) else []:
             path = str(binary.get("path") or "")
-            if "device_manager" not in path:
+            if not path:
                 continue
-            component_id = self.graph.resolve_component_id(path) or self.graph.resolve_component_id("device_manager.fcgi")
+            component_id = self.graph.resolve_component_id(path) or self.graph.resolve_component_id(Path(path).name)
             for symbol in binary.get("dangerous_symbols", [])[: self.config.taint.max_sinks]:
                 sink_type = self.registry.sink_type_for(str(symbol))
                 if not sink_type:
                     continue
+                sink_prefix = "FCGI" if "device_manager" in path or path.endswith(".fcgi") else _slug(Path(path).name)
                 sinks.append(
                     SensitiveSink(
-                        sink_id=f"SINK-FCGI-{_slug(sink_type)}-{_slug(symbol)}",
+                        sink_id=f"SINK-{sink_prefix}-{_slug(sink_type)}-{_slug(symbol)}",
                         sink_type=sink_type,
                         component_id=component_id,
                         binary_path=path,
@@ -870,7 +896,8 @@ class TaintAnalysisBuilder:
                         security_relevance=_sink_relevance(sink_type),
                     )
                 )
-        ret_component = self.graph.resolve_component_id("ret2text")
+        firmware_name = str((report.get("firmware") or {}).get("filename") or "").lower()
+        ret_component = self.graph.resolve_component_id("ret2text") if not firmware_name or "ret2text" in firmware_name else None
         ret_evidence = sorted({evidence_id for hypothesis in self.hypotheses if "ret2text" in (hypothesis.id + hypothesis.title).lower() for evidence_id in hypothesis.evidence_ids})
         if ret_component:
             sinks.append(
