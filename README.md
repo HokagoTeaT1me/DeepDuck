@@ -1,56 +1,32 @@
 # DeepDuck
 
 [![Python](https://img.shields.io/badge/Python-3.10%2B-blue)](https://www.python.org/)
-[![arXiv](https://img.shields.io/badge/arXiv-TBD-b31b1b)]()
 [![Docker](https://img.shields.io/badge/Docker-runtime-blue)](https://www.docker.com/)
 [![License](https://img.shields.io/badge/License-MIT-green)](pyproject.toml)
+[![arXiv](https://img.shields.io/badge/arXiv-2608.xxxxx-b31b1b)](https://arxiv.org/abs/xxxx.xxxxx)
 [![Reports](https://img.shields.io/badge/reports-Markdown%20%7C%20HTML%20%7C%20JSON-purple)](#reports)
 
-Deep Exploration and Evaluation Platform for Device Understanding, Correlation, and Knowledge.
+**🦆 Deep Exploration and Evaluation Platform for Device Understanding, Correlation, and Knowledge.**
 
 DeepDuck is an automated evidence-driven firmware security analysis agent. It combines firmware extraction, canonical root filesystem validation, real headless binary analysis, cross-component evidence correlation, bounded runtime validation, and provider-backed investigation under deterministic safety and budget controls.
 
 DeepDuck does not generate exploits, does not probe public targets, and does not manufacture vulnerability findings when evidence is insufficient.
 
-## Overview
+## 🧭 Overview
 
-DeepDuck turns a firmware image into a reproducible analysis workspace:
+DeepDuck turns a firmware image into a reproducible analysis workspace while keeping static reasoning, runtime observations, and final claims explicitly separated.
 
-```text
-┌──────────────────────────────┐
-│        DeepDuck CLI          │
-└──────────────┬───────────────┘
-               ↓
-┌──────────────────────────────┐
-│ Extraction / RootFS / ELF    │
-└──────────────┬───────────────┘
-               ↓
-┌──────────────────────────────┐
-│ Dockerized Ghidra Analysis   │
-└──────────────┬───────────────┘
-               ↓
-┌──────────────────────────────┐
-│ Evidence & Component Graph   │
-│ Surface / Source-Sink        │
-└──────────────┬───────────────┘
-               ↓
-┌──────────────────────────────┐
-│ Investigation Controller     │
-│ Deterministic / Provider     │
-└──────────────┬───────────────┘
-               ↓
-┌──────────────────────────────┐
-│ Safe Dynamic Validation      │
-└──────────────┬───────────────┘
-               ↓
-┌──────────────────────────────┐
-│ Findings + Reports           │
-└──────────────────────────────┘
-```
+<p align="center">
+  <img src="assets/overview.png" alt="DeepDuck architecture" width="100%">
+</p>
+
+<p align="center">
+  <sub><b>Figure 1.</b> DeepDuck evidence-driven firmware analysis architecture.</sub>
+</p>
 
 Provider-backed investigation is a planning and decision layer. The provider sees registered structured tools through DeepDuck's controller; it does not receive arbitrary shell, Docker, QEMU, or process-execution tools.
 
-## Key Features
+## ✨ Key Features
 
 - Firmware extraction with Docker/binwalk-backed root filesystem recovery.
 - Canonical RootFS validation, ELF inventory, architecture detection, and task workspace management.
@@ -65,9 +41,23 @@ Provider-backed investigation is a planning and decision layer. The provider see
 - JSON, Markdown, and local/offline HTML reports.
 - Resume, status, cleanup, and explicit report-regeneration commands.
 
-## Quick Start
+## 🔄 Analysis Workflow
 
-### Requirements
+DeepDuck follows an evidence-centered investigation workflow. Firmware preparation narrows the search space, static analysis produces explicit evidence-backed hypotheses, and bounded dynamic validation collects real observations before a hypothesis can influence a final finding.
+
+<p align="center">
+  <img src="assets/workflow.png" alt="DeepDuck investigation workflow" width="100%">
+</p>
+
+<p align="center">
+  <sub><b>Figure 2.</b> DeepDuck end-to-end investigation workflow.</sub>
+</p>
+
+The workflow is intentionally conservative: reachability is not treated as exploitability, a source and sink do not automatically establish data flow, and runtime reconstruction is not presented as proof of stock vendor boot parity.
+
+## 🚀 Quick Start
+
+### 📦 Requirements
 
 - Python 3.10 or newer.
 - Docker Engine-compatible runtime.
@@ -75,7 +65,7 @@ Provider-backed investigation is a planning and decision layer. The provider see
 - Host Ghidra is not required for the default containerized deep-static backend.
 - Host Java 21 is not required for the default containerized deep-static backend.
 
-### Installation
+### 🛠️ Installation
 
 DeepDuck is not documented here as a PyPI package. Install from the repository:
 
@@ -87,7 +77,7 @@ python -m pip install -e .
 
 The user-facing console command is `deepduck`. The Python package name remains `fwagent` internally for compatibility.
 
-### Analyze Firmware
+### 🔍 Analyze Firmware
 
 ```bash
 deepduck analyze firmware.bin
@@ -101,7 +91,7 @@ Advanced example:
 deepduck analyze firmware.bin --workspace workspace --task-id my-analysis --timeout 1200 --report-format json,md,html
 ```
 
-### Status and Reports
+### 📊 Status and Reports
 
 ```bash
 deepduck status my-analysis --workspace workspace
@@ -114,7 +104,7 @@ Developer fallback:
 python -m fwagent.cli analyze firmware.bin --workspace workspace --task-id my-analysis
 ```
 
-## Provider-Backed Investigation
+## 🤖 Provider-Backed Investigation
 
 Provider integration is optional. Deterministic analysis can run without provider credentials; provider-backed commands require a configured model API.
 
@@ -151,9 +141,9 @@ Provider-backed validation smoke:
 deepduck agent-smoke my-analysis H-PROVIDER-SMOKE --workspace workspace
 ```
 
-Current v0.1 provider acceptance validates bounded provider-backed execution. The accepted smoke run terminated at the configured controller step budget (`max_steps`), not through an autonomous convergence decision.
+Current v0.1 provider acceptance validates **bounded provider-backed execution**. The accepted smoke run terminated at the configured controller step budget (`max_steps`), not through an autonomous convergence decision.
 
-## Safety and Evidence Model
+## 🛡️ Safety and Evidence Model
 
 DeepDuck is intentionally conservative:
 
@@ -173,7 +163,7 @@ Interpretation rules:
 - `HTTP 500 != VULNERABILITY`
 - `RUNTIME RECONSTRUCTION != STOCK BOOT PARITY`
 
-## Reports
+## 📄 Reports
 
 Each analysis task can generate:
 
@@ -193,7 +183,7 @@ Each analysis task can generate:
 
 The HTML report is a local/offline artifact, not a Web UI.
 
-## Validated Example
+## ✅ Validated Example
 
 Latest local real-firmware acceptance used a TP-Link SR20 firmware image:
 
@@ -219,7 +209,7 @@ The selected FastCGI validation reached the application and observed an HTTP 500
 
 DeepDuck does not treat `Findings: 0` as a failed run. It means no vulnerability was promoted from the available canonical evidence.
 
-## v0.1 Acceptance Status
+## 🧪 v0.1 Acceptance Status
 
 Current status:
 
@@ -244,7 +234,7 @@ Current status:
 
 Release candidate compatibility validation remains pending for a second distinct authorized real firmware image. DeepDuck v0.1 is therefore not documented as RC-ready.
 
-## Validated Samples
+## 🧩 Validated Samples
 
 | Sample Class | Status | Notes |
 |---|---|---|
@@ -253,7 +243,7 @@ Release candidate compatibility validation remains pending for a second distinct
 | Opaque unsupported sample | PASS | Graceful partial handling, no crash |
 | Second distinct real firmware | PENDING | Required before full multi-firmware RC gate |
 
-## Known Limitations
+## ⚠️ Known Limitations
 
 1. Real multi-firmware acceptance currently includes only one distinct real firmware image.
 2. Dynamic validation has been demonstrated on the selected FastCGI path, not every firmware service.
@@ -262,7 +252,7 @@ Release candidate compatibility validation remains pending for a second distinct
 5. Provider-backed execution is bounded by deterministic controller budgets.
 6. Whole-firmware emulation is not guaranteed for every image.
 
-## Development and Testing
+## 🧰 Development and Testing
 
 Run the full test suite:
 
@@ -286,10 +276,13 @@ docker build -t fwagent-round2:latest .
 
 `fwagent-round2:latest` and `fwagent-round3-dynamic:latest` are internal implementation image names retained for reproducibility metadata; DeepDuck is the product name.
 
-## Project Layout
+## 📁 Project Layout
 
 ```text
 DeepDuck/
+  assets/
+    architecture.png
+    workflow.png
   fwagent/        # Internal Python package
   config/         # Ghidra and dynamic validation configuration
   ghidra_scripts/ # Containerized Ghidra export helpers
@@ -298,6 +291,6 @@ DeepDuck/
   reports/        # Local generated reports, ignored by Git
 ```
 
-## License
+## 📜 License
 
 This project is configured as MIT in `pyproject.toml`.
