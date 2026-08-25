@@ -611,9 +611,11 @@ class ComponentGraphBuilder:
                 )
                 self._relationship(component, function, "references", "static_reference", [f"BIN:{path}"], 0.56, f"{path} references {symbol}", relevance=0.72)
             ghidra = binary.get("ghidra") if isinstance(binary.get("ghidra"), dict) else {}
+            ghidra_evidence_ids = ghidra.get("evidence_ids") if isinstance(ghidra.get("evidence_ids"), list) else []
+            relationship_evidence = [str(item) for item in ghidra_evidence_ids] or [f"GHIDRA:{path}"]
             for function_name in ghidra.get("functions", [])[:24] if isinstance(ghidra.get("functions"), list) else []:
                 function = self._component("function", str(function_name), binary_id=component.component_id, confidence=0.68)
-                self._relationship(component, function, "contains", "ghidra_analysis", [f"GHIDRA:{path}"], 0.64, f"Ghidra identified function {function_name}", relevance=0.62)
+                self._relationship(component, function, "contains", "static_reference", relationship_evidence, 0.64, f"Ghidra identified function {function_name}", relevance=0.62)
 
     def _ingest_services(self, report: dict[str, Any]) -> None:
         for service in report.get("services", []) if isinstance(report.get("services"), list) else []:

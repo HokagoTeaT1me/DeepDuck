@@ -3,6 +3,8 @@ from __future__ import annotations
 import tempfile
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
+from unittest.mock import patch
 
 from fwagent.dynamic.api import DynamicToolAPI
 from fwagent.dynamic.application import (
@@ -18,6 +20,7 @@ from fwagent.dynamic.fastcgi_harness import (
     encode_params,
     encode_stdin,
     parse_fastcgi_response,
+    run_fastcgi_harness,
 )
 from fwagent.dynamic.models import DYNAMIC_EVIDENCE_TYPES
 
@@ -128,6 +131,15 @@ class Round34FastCGITests(unittest.TestCase):
         )
         self.assertEqual(response["status_hint"], 404)
         self.assertIn("Status: 404", response["stdout"])
+
+    def test_fastcgi_harness_reports_blocked_without_unix_sockets(self) -> None:
+        with patch("fwagent.dynamic.fastcgi_harness.socket", SimpleNamespace()):
+            result = run_fastcgi_harness(["backend"], runtime_dir="/tmp/fwagent-test")
+
+        self.assertFalse(result["success"])
+        self.assertTrue(result["runtime_environment_blocked"])
+        self.assertEqual(result["diagnosis"], "RUNTIME_ENVIRONMENT_BLOCKED")
+        self.assertFalse(result["request_sent"])
 
     def test_startup_graph_marks_182_block_before_request_loop(self) -> None:
         stages = infer_startup_stages(

@@ -78,6 +78,13 @@ def run_fastcgi_harness(
     cwd: str | Path = "/",
     env: dict[str, str] | None = None,
 ) -> dict[str, Any]:
+    if not hasattr(socket, "AF_UNIX"):
+        return _blocked_result(
+            "RUNTIME_ENVIRONMENT_BLOCKED",
+            "AF_UNIX sockets are unavailable on this host Python runtime; standalone FastCGI FD0 harness requires a Unix-domain listening socket.",
+            socket_path=str(Path(runtime_dir) / socket_name),
+        )
+
     runtime = Path(runtime_dir)
     runtime.mkdir(parents=True, exist_ok=True)
     socket_path = runtime / socket_name
@@ -92,16 +99,28 @@ def run_fastcgi_harness(
     os.chmod(socket_path, 0o777)
 
     start = time.monotonic()
-    process = subprocess.Popen(
-        command,
-        stdin=listener,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        cwd=str(cwd),
-        env=env,
-        close_fds=True,
-        start_new_session=os.name != "nt",
-    )
+    try:
+        process = subprocess.Popen(
+            command,
+            stdin=listener,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            cwd=str(cwd),
+            env=env,
+            close_fds=True,
+            start_new_session=os.name != "nt",
+        )
+    except OSError as exc:
+        listener.close()
+        try:
+            socket_path.unlink()
+        except FileNotFoundError:
+            pass
+        return _blocked_result(
+            "RUNTIME_ENVIRONMENT_BLOCKED",
+            f"FastCGI child could not inherit the listening socket on this host runtime: {exc}",
+            socket_path=str(socket_path),
+        )
     listener.close()
     request_sent = False
     response = {"stdout": "", "stderr": "", "status_hint": None, "end_request": None}
@@ -189,6 +208,28 @@ def run_fastcgi_harness(
     output["socket_path"] = str(socket_path)
     output["duration"] = round(time.monotonic() - start, 3)
     return output
+
+
+def _blocked_result(diagnosis: str, reason: str, *, socket_path: str) -> dict[str, Any]:
+    result = FastCGIHarnessResult(
+        backend_started=False,
+        backend_alive=False,
+        socket_ready=False,
+        request_sent=False,
+        response_received=False,
+        response_status_hint=None,
+        stdout_preview="",
+        stderr_preview=reason,
+        exit_code=None,
+        diagnosis=diagnosis,
+    ).to_dict()
+    result["success"] = False
+    result["runtime_environment_blocked"] = True
+    result["blocked_reason"] = reason
+    result["socket_path"] = socket_path
+    result["fastcgi_stdout"] = ""
+    result["duration"] = 0.0
+    return result
 
 
 def default_fastcgi_params() -> dict[str, str]:

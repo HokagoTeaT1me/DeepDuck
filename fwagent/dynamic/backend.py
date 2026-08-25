@@ -999,17 +999,32 @@ class QemuUserServiceBackend(EmulationBackend):
         probe = None
         request_observations: list[dict[str, Any]] = []
         errors: list[str] = []
+        result: dict[str, Any] | None = None
         try:
-            backend_process = subprocess.Popen(
-                backend_command,
-                stdin=listener,
-                stdout=backend_stdout,
-                stderr=backend_stderr,
-                cwd="/",
-                env=_minimal_firmware_env(),
-                close_fds=True,
-                start_new_session=os.name != "nt",
-            )
+            try:
+                backend_process = subprocess.Popen(
+                    backend_command,
+                    stdin=listener,
+                    stdout=backend_stdout,
+                    stderr=backend_stderr,
+                    cwd="/",
+                    env=_minimal_firmware_env(),
+                    close_fds=True,
+                    start_new_session=os.name != "nt",
+                )
+            except OSError as exc:
+                errors.append(f"backend_start: {exc}")
+                result = _fastcgi_integration_blocked_result(
+                    backend=backend,
+                    endpoint=endpoint,
+                    repair=repair,
+                    backend_command=backend_command,
+                    listener_host=str(listener_host),
+                    listener_port=int(listener_port),
+                    errors=errors,
+                    blocked_reason=f"FastCGI child could not inherit the loopback listener as stdin on this host runtime: {exc}",
+                )
+                raise _FastCGIIntegrationBlocked()
             listener.close()
             time.sleep(0.5)
             backend_alive = backend_process.poll() is None
@@ -1026,14 +1041,30 @@ class QemuUserServiceBackend(EmulationBackend):
             lighttpd_command = self._service_command(command_rootfs, repaired_profile)
             env = dict(os.environ)
             env.update(service_profile.environment)
-            lighttpd_process = subprocess.Popen(
-                lighttpd_command,
-                stdout=lighttpd_stdout,
-                stderr=lighttpd_stderr,
-                cwd="/",
-                env=env,
-                start_new_session=os.name != "nt",
-            )
+            try:
+                lighttpd_process = subprocess.Popen(
+                    lighttpd_command,
+                    stdout=lighttpd_stdout,
+                    stderr=lighttpd_stderr,
+                    cwd="/",
+                    env=env,
+                    start_new_session=os.name != "nt",
+                )
+            except OSError as exc:
+                errors.append(f"lighttpd_start: {exc}")
+                result = _fastcgi_integration_blocked_result(
+                    backend=backend,
+                    endpoint=endpoint,
+                    repair=repair,
+                    backend_command=backend_command,
+                    listener_host=str(listener_host),
+                    listener_port=int(listener_port),
+                    errors=errors,
+                    blocked_reason=f"lighttpd service command could not start on this host runtime: {exc}",
+                    lighttpd_command=lighttpd_command,
+                    backend_alive=backend_alive,
+                )
+                raise _FastCGIIntegrationBlocked()
             time.sleep(max(0, stability_seconds))
             lighttpd_alive = lighttpd_process.poll() is None
             port = service_profile.expected_ports[0] if service_profile.expected_ports else 3000
@@ -1124,6 +1155,8 @@ class QemuUserServiceBackend(EmulationBackend):
                 "errors": errors,
                 "diagnosis": "fastcgi_integration_reachable" if success else "fastcgi_validation_blocked",
             }
+        except _FastCGIIntegrationBlocked:
+            pass
         finally:
             for process in (lighttpd_process, backend_process):
                 if process is not None and process.poll() is None:
@@ -1138,6 +1171,18 @@ class QemuUserServiceBackend(EmulationBackend):
                 listener.close()
             except OSError:
                 pass
+        if result is None:
+            result = {
+                "success": False,
+                "backend": backend,
+                "endpoint": endpoint,
+                "runtime_repair": repair,
+                "source_rootfs_modified": False,
+                "request_observations": request_observations,
+                "application_response_reached": False,
+                "errors": errors or ["FastCGI integration validation ended without a structured runtime result"],
+                "diagnosis": "fastcgi_validation_inconclusive",
+            }
         result["logs"] = {
             "backend_stderr": _tail(backend_stderr_path, 80),
             "lighttpd_stderr": _tail(lighttpd_stderr_path, 80),
@@ -1287,10 +1332,23 @@ class QemuUserServiceBackend(EmulationBackend):
 
     def _rootfs(self) -> Path | None:
         report = self.workspace.load_report()
-        rootfs = report.get("extraction", {}).get("rootfs")
-        if not rootfs or not Path(rootfs).is_dir():
-            return None
-        return Path(rootfs)
+        extraction = report.get("extraction", {})
+        canonical = extraction.get("canonical_rootfs") or {}
+        candidates = [
+            extraction.get("rootfs"),
+            canonical.get("workspace_relative_path"),
+            canonical.get("path"),
+            canonical.get("host_path"),
+        ]
+        for candidate in candidates:
+            if not candidate:
+                continue
+            path = Path(str(candidate))
+            if not path.is_absolute():
+                path = self.workspace.task_dir / path
+            if path.is_dir():
+                return path
+        return None
 
     def _service_dir(self, service: str) -> Path:
         path = self.workspace.dynamic_dir / "services" / service
@@ -1423,6 +1481,50 @@ def _replace_config_argument(arguments: list[str], config_file: str) -> list[str
             updated[index + 1] = config_file
             return updated
     return [*updated, "-f", config_file]
+
+
+class _FastCGIIntegrationBlocked(Exception):
+    pass
+
+
+def _fastcgi_integration_blocked_result(
+    *,
+    backend: str,
+    endpoint: str,
+    repair: dict[str, Any],
+    backend_command: list[str],
+    listener_host: str,
+    listener_port: int,
+    errors: list[str],
+    blocked_reason: str,
+    lighttpd_command: list[str] | None = None,
+    backend_alive: bool = False,
+) -> dict[str, Any]:
+    return {
+        "success": False,
+        "backend": backend,
+        "endpoint": endpoint,
+        "runtime_repair": repair,
+        "source_rootfs_modified": False,
+        "runtime_environment_blocked": True,
+        "blocked_reason": blocked_reason,
+        "backend_child": {
+            "started": False,
+            "alive_after_startup": backend_alive,
+            "command": backend_command,
+            "listener": {"host": listener_host, "port": listener_port},
+        },
+        "lighttpd": {
+            "started": False,
+            "alive_after_startup": False,
+            "command": lighttpd_command or [],
+        },
+        "probe": None,
+        "request_observations": [],
+        "application_response_reached": False,
+        "errors": list(errors),
+        "diagnosis": "RUNTIME_ENVIRONMENT_BLOCKED",
+    }
 
 
 def _lighttpd_without_fastcgi(config: str) -> str:

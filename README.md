@@ -1,279 +1,303 @@
-# DeepDuck: Agentic IoT Firmware Analysis Pipeline
+# DeepDuck
 
 [![Python](https://img.shields.io/badge/Python-3.10%2B-blue)](https://www.python.org/)
+[![arXiv](https://img.shields.io/badge/arXiv-TBD-b31b1b)]()
 [![Docker](https://img.shields.io/badge/Docker-runtime-blue)](https://www.docker.com/)
-[![arXiv](https://img.shields.io/badge/arXiv-TBD-b31b1b.svg)]()
 [![License](https://img.shields.io/badge/License-MIT-green)](pyproject.toml)
-[![Status](https://img.shields.io/badge/status-active%20research-orange)](#roadmap)
-[![Reports](https://img.shields.io/badge/reports-Markdown%20%7C%20HTML%20%7C%20JSON-purple)](#sample-report)
+[![Reports](https://img.shields.io/badge/reports-Markdown%20%7C%20HTML%20%7C%20JSON-purple)](#reports)
 
-**DeepDuck** stands for **Deep Exploration and Evaluation Platform for Device Understanding, Correlation, and Knowledge**. It is a deterministic-first IoT
-firmware analysis framework that turns a firmware image into a reproducible
-workspace containing extraction evidence, filesystem inventory, service
-discovery, binary triage, dynamic reachability artifacts, and final reports.
+Deep Exploration and Evaluation Platform for Device Understanding, Correlation, and Knowledge.
 
-The project is designed for agent-assisted security research: scanners produce
-structured evidence, the agent reasons over bounded tools, and reports clearly
-separate confirmed facts from candidate risks.
+DeepDuck is an automated evidence-driven firmware security analysis agent. It combines firmware extraction, canonical root filesystem validation, real headless binary analysis, cross-component evidence correlation, bounded runtime validation, and provider-backed investigation under deterministic safety and budget controls.
 
-## 🎯 Who is DeepDuck for?
+DeepDuck does not generate exploits, does not probe public targets, and does not manufacture vulnerability findings when evidence is insufficient.
 
-| 👥 **User Type** | 🚀 **Use Case** |
-|---|---|
-| **Firmware Researchers** | Build repeatable first-pass analysis workspaces from router/IoT images |
-| **Security Engineers** | Prioritize network services, Web handlers, credentials, and risky binaries |
-| **Reverse Engineers** | Select high-value ELF targets for Ghidra and call-graph inspection |
-| **Agent Builders** | Connect LLM planning to constrained firmware-analysis tools |
-| **Lab Operators** | Run isolated Docker/QEMU/FirmAE validation without touching live targets |
+## Overview
 
-## ✨ Key Features
+DeepDuck turns a firmware image into a reproducible analysis workspace:
 
-### For All Users
+```text
+┌──────────────────────────────┐
+│        DeepDuck CLI          │
+└──────────────┬───────────────┘
+               ↓
+┌──────────────────────────────┐
+│ Extraction / RootFS / ELF    │
+└──────────────┬───────────────┘
+               ↓
+┌──────────────────────────────┐
+│ Dockerized Ghidra Analysis   │
+└──────────────┬───────────────┘
+               ↓
+┌──────────────────────────────┐
+│ Evidence & Component Graph   │
+│ Surface / Source-Sink        │
+└──────────────┬───────────────┘
+               ↓
+┌──────────────────────────────┐
+│ Investigation Controller     │
+│ Deterministic / Provider     │
+└──────────────┬───────────────┘
+               ↓
+┌──────────────────────────────┐
+│ Safe Dynamic Validation      │
+└──────────────┬───────────────┘
+               ↓
+┌──────────────────────────────┐
+│ Findings + Reports           │
+└──────────────────────────────┘
+```
 
-- **🧭 One-command analysis**: Run `deepduck analyze` and get a task workspace with reports.
-- **📦 Safe extraction workspace**: Copy firmware into an isolated task directory before processing.
-- **📊 Multi-format reports**: Emit Markdown, HTML, and JSON final reports.
-- **🔐 Safety-first posture**: No public target scanning, no exploit execution, and no arbitrary agent shell tools.
+Provider-backed investigation is a planning and decision layer. The provider sees registered structured tools through DeepDuck's controller; it does not receive arbitrary shell, Docker, QEMU, or process-execution tools.
 
-### For Firmware Analysts
+## Key Features
 
-- **🧬 Firmware fingerprinting**: Hash, size, file type, magic bytes, and format discovery.
-- **🗂️ Rootfs inventory**: Count ELF binaries, scripts, configs, certificates, Web assets, and symlinks.
-- **🌐 Attack surface discovery**: Identify startup services, Web roots, CGI/FastCGI handlers, and network daemons.
-- **🎯 Binary prioritization**: Rank binaries by service exposure, dangerous imports, HTTP strings, shell references, and stripping.
+- Firmware extraction with Docker/binwalk-backed root filesystem recovery.
+- Canonical RootFS validation, ELF inventory, architecture detection, and task workspace management.
+- Binary prioritization for high-value static targets.
+- Containerized Ghidra analysis with generated function/import/export artifacts.
+- Component graph construction and attack-surface modeling.
+- Evidence-backed source/sink correlation for security-relevant context.
+- Deterministic hypothesis synthesis, validation prioritization, and bounded investigation loops.
+- Safe runtime reconstruction for selected service/application validation paths.
+- FastCGI/service validation with provenance-tracked DynamicEvidence records.
+- Provider-backed investigation with structured output and controlled tool calling.
+- JSON, Markdown, and local/offline HTML reports.
+- Resume, status, cleanup, and explicit report-regeneration commands.
 
-### For Agentic Workflows
+## Quick Start
 
-- **🧠 Model smoke tests**: Validate provider connectivity, structured output, and tool-calling behavior.
-- **🛠️ Bounded tools**: Expose only structured `firmware.*`, `ghidra.*`, `dynamic.*`, `evidence.*`, and `hypothesis.*` tools.
-- **🧾 Evidence traceability**: Persist tool traces, hypotheses, validations, findings, and report manifests.
-- **🧪 Runtime reachability path**: Prepare dynamic investigation artifacts for Docker/QEMU/FirmAE workflows.
+### Requirements
 
-## 🚀 Quick Start
+- Python 3.10 or newer.
+- Docker Engine-compatible runtime.
+- Tested environment: Windows 10/11 with Docker Desktop.
+- Host Ghidra is not required for the default containerized deep-static backend.
+- Host Java 21 is not required for the default containerized deep-static backend.
 
 ### Installation
 
-**Option 1: Editable local install**
+DeepDuck is not documented here as a PyPI package. Install from the repository:
 
 ```bash
-git clone <your-deepduck-repo-url>
+git clone https://github.com/HokagoTeaT1me/DeepDuck.git
 cd DeepDuck
-pip install -e .
+python -m pip install -e .
 ```
 
-**Option 2: Run from source**
+The user-facing console command is `deepduck`. The Python package name remains `fwagent` internally for compatibility.
+
+### Analyze Firmware
 
 ```bash
-deepduck doctor
-deepduck analyze path/to/firmware.bin
+deepduck analyze firmware.bin
 ```
 
-**Option 3: Docker runtime**
+By default, DeepDuck creates a task under `workspace/` and generates reports under `workspace/<task-id>/reports/`.
+
+Advanced example:
 
 ```bash
-docker build -t fwagent-round2:latest .
-docker run --rm --network none -v "$PWD:/work" -w /work \
-  fwagent-round2:latest deepduck analyze /work/path/to/firmware.bin --workspace /work/workspace
+deepduck analyze firmware.bin --workspace workspace --task-id my-analysis --timeout 1200 --report-format json,md,html
 ```
 
-### First Run
-
-#### 1. Analyze a firmware image
+### Status and Reports
 
 ```bash
-deepduck analyze samples/firmware.bin \
-  --workspace workspace \
-  --task-id demo-firmware \
-  --max-iterations 3
+deepduck status my-analysis --workspace workspace
+deepduck report my-analysis --workspace workspace --format json,md,html
 ```
 
-#### 2. Show task status
+Developer fallback:
 
 ```bash
-deepduck status demo-firmware --workspace workspace
+python -m fwagent.cli analyze firmware.bin --workspace workspace --task-id my-analysis
 ```
 
-#### 3. Regenerate final reports
+## Provider-Backed Investigation
+
+Provider integration is optional. Deterministic analysis can run without provider credentials; provider-backed commands require a configured model API.
+
+DeepDuck reads provider configuration from environment variables or a local `.env` file. Required variable names:
+
+```text
+MODEL_PROVIDER
+MODEL_NAME
+MODEL_API_KEY
+MODEL_BASE_URL
+```
+
+Compatibility aliases are also supported:
+
+```text
+FWAGENT_MODEL_PROVIDER
+FWAGENT_MODEL_NAME
+FWAGENT_MODEL_API_KEY
+FWAGENT_MODEL_BASE_URL
+```
+
+`.env` is ignored by Git and Docker builds. Do not put API keys in reports, prompts, commits, or issue text.
+
+Provider diagnostics:
 
 ```bash
-deepduck report demo-firmware \
-  --workspace workspace \
-  --format md,html,json
+deepduck model-doctor --connect
+deepduck model-smoke
 ```
 
-## 📚 Core Workflow
-
-| Stage | Output | Purpose |
-|---|---|---|
-| **Identify** | `reports/analysis.json` | Hash and classify the firmware input |
-| **Extract** | `extracted/` | Recover root filesystem candidates |
-| **Inventory** | `filesystem` section | Count files, scripts, configs, ELF binaries, Web assets |
-| **Surface** | `surface/` | Map services, Web routes, entry points, and reachability hints |
-| **Investigate** | `evidence/`, `hypotheses/` | Promote interesting observations into bounded hypotheses |
-| **Validate** | `dynamic/`, `simulation/` | Record runtime attempts and blocked validations |
-| **Report** | `reports/report.*` | Produce human and machine-readable final reports |
-
-## 🛠️ Usage Examples
-
-### Static-only triage
+Provider-backed validation smoke:
 
 ```bash
-deepduck analyze firmware.bin \
-  --workspace workspace \
-  --task-id static-triage \
-  --static-only
+deepduck agent-smoke my-analysis H-PROVIDER-SMOKE --workspace workspace
 ```
 
-### Agent-assisted investigation
+Current v0.1 provider acceptance validates bounded provider-backed execution. The accepted smoke run terminated at the configured controller step budget (`max_steps`), not through an autonomous convergence decision.
 
-```bash
-deepduck investigate static-triage \
-  --workspace workspace \
-  --binary /usr/sbin/lighttpd \
-  --max-steps 10 \
-  --max-binary-analyses 1 \
-  --max-decompilations-per-binary 5
-```
+## Safety and Evidence Model
 
-### Model provider smoke test
+DeepDuck is intentionally conservative:
 
-```bash
-deepduck model check
-```
+- Analyze local and authorized firmware only.
+- Do not probe public targets.
+- Do not expose arbitrary shell, Docker, QEMU, or process execution to the provider.
+- Do not generate exploit payloads.
+- Keep dynamic validation bounded by request, tool-call, runtime, and loopback controls.
+- Track evidence provenance and runtime-observation status.
+- Exclude mock, simulated, blocked, and inconclusive attempts from canonical real-runtime confirmation.
 
-Model configuration is read from environment variables or a local `.env` file:
+Interpretation rules:
 
-```env
-MODEL_PROVIDER=
-MODEL_NAME=
-MODEL_API_KEY=
-MODEL_BASE_URL=
-```
+- `SOURCE + SINK != VULNERABILITY`
+- `CALL PATH != DATA FLOW`
+- `REACHABLE != EXPLOITABLE`
+- `HTTP 500 != VULNERABILITY`
+- `RUNTIME RECONSTRUCTION != STOCK BOOT PARITY`
 
-`.env` is ignored by Git and Docker builds. Keep provider keys out of reports,
-logs, and prompts unless a specific task requires a transient API call.
+## Reports
 
-### Ghidra environment check
+Each analysis task can generate:
 
-```bash
-deepduck ghidra check
-deepduck doctor
-```
+| Artifact | Path |
+|---|---|
+| JSON report | `workspace/<task-id>/reports/report.json` |
+| Markdown report | `workspace/<task-id>/reports/report.md` |
+| HTML report | `workspace/<task-id>/reports/report.html` |
+| Report manifest | `workspace/<task-id>/reports/report_manifest.json` |
+| Pipeline summary | `workspace/<task-id>/pipeline_summary.json` |
+| Pipeline stages | `workspace/<task-id>/pipeline_stages.json` |
+| Extraction record | `workspace/<task-id>/artifacts/extraction.json` |
+| Canonical rootfs record | `workspace/<task-id>/artifacts/rootfs.json` |
+| Ghidra summary | `workspace/<task-id>/ghidra/analysis_summary.json` |
+| Dynamic evidence | `workspace/<task-id>/dynamic/evidence/evidence.json` |
+| Findings | `workspace/<task-id>/findings/findings.json` |
 
-### Docker validation
+The HTML report is a local/offline artifact, not a Web UI.
 
-```bash
-docker build -t fwagent-round2:latest .
-docker run --rm --network none -v "$PWD:/work" -w /work \
-  fwagent-round2:latest deepduck analyze /work/firmware.bin \
-  --workspace /work/workspace \
-  --task-id docker-demo
-```
+## Validated Example
 
-## 📄 Sample Report
-
-The latest local firmware run analyzed:
+Latest local real-firmware acceptance used a TP-Link SR20 firmware image:
 
 ```text
 tpra_sr20v1_us-up-ver1-2-1-P522_20180518-rel77140_2018-05-21_08.42.04.bin
 ```
 
-Generated artifacts:
+Observed results:
 
-| Artifact | Path |
+| Metric | Result |
 |---|---|
-| Markdown report | `workspace/deepseek-firmware-02/reports/firmware_analysis_report.md` |
-| HTML report | `workspace/deepseek-firmware-02/reports/firmware_analysis_report.html` |
-| Evidence JSON | `workspace/deepseek-firmware-02/reports/analysis_docker_rootfs.json` |
-| Model triage | `workspace/deepseek-firmware-02/reports/deepseek_triage.md` |
+| Extraction backend | Docker/binwalk |
+| RootFS files | 2255 |
+| ELF binaries | 457 |
+| Architecture | ARM 32-bit little-endian |
+| Real Dockerized Ghidra | 20 / 20 |
+| Ghidra fallback | 0 |
+| Runtime path | Selected FastCGI integration |
+| Real runtime observations | 4 |
+| Findings | 0 |
 
-### Executive Summary Preview
+The selected FastCGI validation reached the application and observed an HTTP 500 SOAP fault for an unknown SOAP action. That response is application behavior for the safe probe and is not a vulnerability claim.
 
-- Docker/binwalk recovered a SquashFS root filesystem at offset `0x212FF9`.
-- Platform identified as `ARM` `32-bit` little-endian with confidence `1.0`.
-- Rootfs inventory found `2165` files, `457` ELF binaries, `531` scripts, `596` Web files, and `481` config files.
-- Attack surface discovery identified `8` service candidates, Web root `/www`, CGI entries `/www/cgi-bin/luci` and `/www/cgi-bin/luci-cloud`.
-- Candidate security observations include private-key material and empty `guest` password/shadow fields; these remain static candidates pending validation.
+DeepDuck does not treat `Findings: 0` as a failed run. It means no vulnerability was promoted from the available canonical evidence.
 
-### Priority Audit Targets
+## v0.1 Acceptance Status
 
-| Rank | Target | Score | Why it matters |
-|---:|---|---:|---|
-| 1 | `/usr/sbin/lighttpd` | 81 | Web server, dangerous imports, HTTP strings, `/bin/sh` reference |
-| 2 | `/usr/sbin/dnsmasq` | 65 | Network daemon, `popen`, `sprintf`, `strcpy`, `memcpy` |
-| 3 | `/usr/sbin/uhttpd` | 55 | Web server, HTTP/CGI surface, authorization strings |
-| 4 | `/usr/sbin/miniupnpd` | 51 | UPnP-facing daemon, HTTP strings, possible `system` reference |
-| 5 | `/www/services/device_manager/device_manager.fcgi` | 15 | FastCGI endpoint handling authorization and SOAP action metadata |
+Current status:
 
-### Web Runtime Evidence
+`DEEPDUCK V0.1 REAL DYNAMIC + REAL PROVIDER ACCEPTED / MULTI-FIRMWARE ACCEPTANCE PARTIAL`
 
-Manual configuration review found:
+| Capability | Status |
+|---|---|
+| Fresh extraction | PASS |
+| Canonical RootFS | PASS |
+| Real Dockerized Ghidra | PASS |
+| Cross-component correlation | PASS |
+| Safe real dynamic runtime | PASS |
+| Canonical runtime evidence | PASS |
+| Provider-backed Agent | PASS |
+| Structured output | PASS |
+| Controlled tool calling | PASS |
+| ARM real firmware | PASS |
+| MIPS architecture fixture | PASS |
+| Unsupported input handling | PASS |
+| Second distinct real firmware | PENDING |
+| Multi-firmware real acceptance | PARTIAL |
 
-- `lighttpd` document root: `/www`
-- `lighttpd` port: `3000`
-- TLS socket: `:10443`
-- FastCGI route: `/services/device_manager/`
-- FastCGI binary: `/www/services/device_manager/device_manager.fcgi`
-- `uhttpd` HTTP listener: `0.0.0.0:80`
-- `uhttpd` HTTPS listener: `0.0.0.0:443`
-- CGI prefix: `/cgi-bin`
+Release candidate compatibility validation remains pending for a second distinct authorized real firmware image. DeepDuck v0.1 is therefore not documented as RC-ready.
 
-> Static reachability does not imply exploitability. Every candidate above needs
-> reverse engineering, call-graph inspection, or runtime validation before it can
-> be promoted to a confirmed vulnerability.
+## Validated Samples
 
-## 🧩 Project Layout
+| Sample Class | Status | Notes |
+|---|---|---|
+| TP-Link SR20 real firmware | PASS | Real extraction, Ghidra, selected dynamic runtime, provider acceptance |
+| MIPS architecture fixture | PASS | Fixture integration coverage only |
+| Opaque unsupported sample | PASS | Graceful partial handling, no crash |
+| Second distinct real firmware | PENDING | Required before full multi-firmware RC gate |
 
-```text
-DeepDuck/
-  fwagent/
-    dynamic/          # QEMU/FirmAE, reachability, service/runtime tooling
-    investigation/    # Agent loop and static investigation orchestration
-    model/            # Provider config, smoke tests, redaction helpers
-    pipeline/         # Product pipeline and workspace orchestration
-    reporting/        # JSON, Markdown, HTML report generation
-    runtime/          # Command, Ghidra, QEMU, FirmAE adapters
-    scanners/         # Config, credential, crypto, and Web scanners
-    tools/            # Firmware, filesystem, architecture, binaries, services
-  docker/             # Worker images and validation scripts
-  scripts/            # Round validation helpers
-  tests/              # Unit tests
-  workspace/          # Generated task workspaces
-```
+## Known Limitations
 
-## 🔒 Safety Model
+1. Real multi-firmware acceptance currently includes only one distinct real firmware image.
+2. Dynamic validation has been demonstrated on the selected FastCGI path, not every firmware service.
+3. Runtime repair establishes reconstructed reachability, not original vendor boot-sequence parity.
+4. Source/sink correlation is evidence-oriented and does not imply vulnerability confirmation.
+5. Provider-backed execution is bounded by deterministic controller budgets.
+6. Whole-firmware emulation is not guaranteed for every image.
 
-DeepDuck is built around conservative analysis boundaries:
+## Development and Testing
 
-- Firmware files are copied into task workspaces and are not modified in place.
-- Default analysis does not execute firmware binaries or chroot into firmware roots.
-- Docker runs should use `--network none` unless a specific local runtime validation needs otherwise.
-- Agent-facing APIs expose structured tools only; arbitrary shell, Docker, and QEMU commands are not registered.
-- Reports classify unsupported observations as candidates until runtime or reverse-engineering evidence exists.
-
-## 🧪 Tests
-
-Run the unit suite:
+Run the full test suite:
 
 ```bash
 python -m unittest discover -v
 ```
 
-Recent local validation:
+Environment-gated real dynamic/provider acceptance tests are available for configured local workspaces:
 
-```text
-467 passed, 1 skipped
+```powershell
+$env:DEEPDUCK_RUN_REAL_DYNAMIC_TESTS='1'
+$env:DEEPDUCK_RUN_REAL_PROVIDER_TESTS='1'
+python -m unittest tests.integration.test_v01_real_dynamic_provider_acceptance -v
 ```
 
-## 🗺️ Roadmap
+Build the default containerized Ghidra/extraction worker:
 
-- **Provider-authored reports**: Let DeepSeek/OpenAI generate final narrative reports directly from DeepDuck evidence bundles.
-- **Deeper FastCGI reproduction**: Reconstruct service startup and request semantics for selected Web backends.
-- **Ghidra-guided promotion**: Promote candidate findings only when call-graph and data-flow evidence supports the claim.
-- **Runtime confirmation loop**: Tie Docker/QEMU/FirmAE observations back into evidence chains and final report status.
-- **Report UX polish**: Add richer HTML report navigation, evidence filters, and artifact indexing.
+```bash
+docker build -t fwagent-round2:latest .
+```
 
-## 📜 License
+`fwagent-round2:latest` and `fwagent-round3-dynamic:latest` are internal implementation image names retained for reproducibility metadata; DeepDuck is the product name.
 
-This project is currently configured as MIT in `pyproject.toml`.
+## Project Layout
 
+```text
+DeepDuck/
+  fwagent/        # Internal Python package
+  config/         # Ghidra and dynamic validation configuration
+  ghidra_scripts/ # Containerized Ghidra export helpers
+  tests/          # Unit and integration tests
+  workspace/      # Generated task workspaces, ignored by Git
+  reports/        # Local generated reports, ignored by Git
+```
+
+## License
+
+This project is configured as MIT in `pyproject.toml`.

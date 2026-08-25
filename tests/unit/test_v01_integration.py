@@ -5,6 +5,7 @@ import json
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 from fwagent.cli import build_parser
 from fwagent.dynamic.correlation import ComponentGraphBuilder
@@ -42,6 +43,71 @@ def base_report() -> dict:
     }
 
 
+class FakeGhidraAPI:
+    def __init__(self, mode: str):
+        self.mode = mode
+        self.calls = 0
+
+    def analyze_binary(self, binary: str | Path, *, allow_fallback: bool = True, force: bool = False) -> dict:
+        self.calls += 1
+        if self.mode == "failed":
+            return {
+                "success": False,
+                "binary": str(binary),
+                "duration": 0.1,
+                "errors": ["Ghidra worker unavailable"],
+                "result": {},
+            }
+        real = self.mode == "real" or (self.mode == "mixed" and self.calls == 1)
+        metadata = (
+            {"fallback": False, "fallback_used": False, "real_ghidra": True, "backend_used": "dockerized_ghidra", "requested_backend": "ghidra"}
+            if real
+            else {
+                "fallback": True,
+                "fallback_used": True,
+                "real_ghidra": False,
+                "backend_used": "static_elf_fallback",
+                "requested_backend": "ghidra",
+                "fallback_reason": "GHIDRA_ANALYZE_HEADLESS_NOT_FOUND",
+            }
+        )
+        return {
+            "success": True,
+            "binary": str(binary),
+            "duration": 0.1,
+            "errors": [],
+            "result": {
+                "summary": {"function_count": 2},
+                "functions": [{"name": "main", "address": "0x1000"}],
+                "imports": [],
+                "exports": [],
+                "strings": [],
+                "callgraph": [{"caller": "main", "callee": "init"}] if real else [],
+                "metadata": metadata,
+            },
+        }
+
+
+class FakeGhidraRuntime:
+    def __init__(self, *args, **kwargs):
+        pass
+
+    def check_environment(self) -> dict:
+        return {"success": False, "errors": ["host analyzeHeadless not found"], "result": {}}
+
+    def check_container_environment(self) -> dict:
+        return {
+            "success": True,
+            "errors": [],
+            "result": {
+                "image": "fwagent-round2:latest",
+                "java_version": "21.0.8",
+                "ghidra_version": "12.1.3",
+                "analyze_headless": "/opt/ghidra/support/analyzeHeadless",
+            },
+        }
+
+
 class DeepDuckV01IntegrationTests(unittest.TestCase):
     def test_stage_order_contains_expected_terminal_stage(self) -> None:
         self.assertEqual(V01_PIPELINE_STAGES[-1], "COMPLETED")
@@ -76,6 +142,19 @@ class DeepDuckV01IntegrationTests(unittest.TestCase):
     def test_cli_accepts_deep_flag(self) -> None:
         args = build_parser().parse_args(["analyze", "firmware.bin", "--deep"])
         self.assertTrue(args.deep)
+
+    def test_environment_check_treats_host_ghidra_as_optional(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            task = Path(tmp) / "t"
+            task.mkdir()
+            with patch("fwagent.pipeline.product.GhidraRuntime", FakeGhidraRuntime):
+                result = AnalysisPipelineController(tmp)._environment_stage(type("Task", (), {"task_id": "t"})())
+            payload = json.loads((task / "environment.json").read_text(encoding="utf-8"))
+
+            self.assertTrue(result["success"])
+            self.assertEqual(payload["host_ghidra"], "OPTIONAL_NOT_REQUIRED")
+            self.assertEqual(payload["containerized_ghidra"], "PASS")
+            self.assertEqual(payload["static_elf_fallback"], "available")
 
     def test_pyproject_exposes_deepduck_console_script(self) -> None:
         text = Path("pyproject.toml").read_text(encoding="utf-8")
@@ -129,6 +208,17 @@ class DeepDuckV01IntegrationTests(unittest.TestCase):
             gaps = AnalysisPipelineController(tmp)._validation_gaps("t", stages)
             self.assertTrue(any("DYNAMIC_VALIDATION" in gap for gap in gaps))
 
+    def test_validation_gaps_include_real_ghidra_zero(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            task = Path(tmp) / "t"
+            write_json(task / "reports" / "analysis.json", base_report())
+            write_json(task / "ghidra" / "analysis_summary.json", {"selected_binary_count": 2, "real_ghidra_count": 0, "fallback_count": 2, "failed_binary_count": 0})
+            stages = {name: PipelineStageResult(name, status="completed") for name in V01_PIPELINE_STAGES}
+            stages["GHIDRA_ANALYSIS"].status = "partial"
+            stages["GHIDRA_ANALYSIS"].partial_reason = "0/2 targets completed with real Ghidra"
+            gaps = AnalysisPipelineController(tmp)._validation_gaps("t", stages)
+            self.assertTrue(any("real Ghidra analyzeHeadless did not complete" in gap for gap in gaps))
+
     def test_write_pipeline_artifact_persists_schema(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             task = Path(tmp) / "t"
@@ -137,6 +227,88 @@ class DeepDuckV01IntegrationTests(unittest.TestCase):
             AnalysisPipelineController(tmp)._write_pipeline_artifacts("t", stages, "COMPLETED_WITH_UNCERTAINTY")
             payload = json.loads((task / "pipeline_stages.json").read_text(encoding="utf-8"))
             self.assertEqual(payload["schema_version"], "deepduck.pipeline.v0.1")
+
+    def test_run_stage_respects_ghidra_partial_stage_status(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            task = Path(tmp) / "t"
+            write_json(task / "reports" / "analysis.json", base_report())
+            binary = task / "rootfs" / "usr" / "sbin" / "dnsmasq"
+            binary.parent.mkdir(parents=True, exist_ok=True)
+            binary.write_bytes(b"\x7fELF")
+            stages = {name: PipelineStageResult(name) for name in V01_PIPELINE_STAGES}
+            controller = AnalysisPipelineController(tmp)
+            with patch("fwagent.pipeline.product.BinaryToolAPI", lambda *args, **kwargs: FakeGhidraAPI("fallback")):
+                controller._run_stage(
+                    stages,
+                    "GHIDRA_ANALYSIS",
+                    {},
+                    lambda: controller._run_ghidra_stage("t", [{"path": "/usr/sbin/dnsmasq", "host_path": str(binary), "exists": True}]),
+                    False,
+                    "ghidra",
+                )
+            self.assertEqual(stages["GHIDRA_ANALYSIS"].status, "partial")
+            self.assertIn("0/1 targets completed with real Ghidra", stages["GHIDRA_ANALYSIS"].partial_reason)
+            summary = json.loads((task / "ghidra" / "analysis_summary.json").read_text(encoding="utf-8"))
+            self.assertEqual(summary["real_ghidra_count"], 0)
+            self.assertEqual(summary["fallback_count"], 1)
+            self.assertEqual(summary["fallback_reasons"]["GHIDRA_ANALYZE_HEADLESS_NOT_FOUND"], 1)
+            self.assertEqual(summary["analyses"][0]["backend_used"], "static_elf_fallback")
+
+    def test_ghidra_stage_partial_real_success(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            task = Path(tmp) / "t"
+            write_json(task / "reports" / "analysis.json", base_report())
+            binaries = []
+            for rel in ("dnsmasq", "uhttpd"):
+                path = task / "rootfs" / "usr" / "sbin" / rel
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_bytes(b"\x7fELF")
+                binaries.append(path)
+            controller = AnalysisPipelineController(tmp)
+            with patch("fwagent.pipeline.product.BinaryToolAPI", lambda *args, **kwargs: FakeGhidraAPI("mixed")):
+                summary = controller._run_ghidra_stage(
+                    "t",
+                    [
+                        {"path": "/usr/sbin/dnsmasq", "host_path": str(binaries[0]), "exists": True},
+                        {"path": "/usr/sbin/uhttpd", "host_path": str(binaries[1]), "exists": True},
+                    ],
+                )
+            self.assertEqual(summary["stage_status"], "partial")
+            self.assertEqual(summary["real_ghidra_count"], 1)
+            self.assertEqual(summary["fallback_count"], 1)
+
+    def test_ghidra_stage_all_real_success_completed(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            task = Path(tmp) / "t"
+            write_json(task / "reports" / "analysis.json", base_report())
+            binary = task / "rootfs" / "usr" / "sbin" / "dnsmasq"
+            binary.parent.mkdir(parents=True, exist_ok=True)
+            binary.write_bytes(b"\x7fELF")
+            controller = AnalysisPipelineController(tmp)
+            with patch("fwagent.pipeline.product.BinaryToolAPI", lambda *args, **kwargs: FakeGhidraAPI("real")):
+                summary = controller._run_ghidra_stage("t", [{"path": "/usr/sbin/dnsmasq", "host_path": str(binary), "exists": True}])
+            self.assertEqual(summary["stage_status"], "completed")
+            self.assertEqual(summary["real_ghidra_count"], 1)
+
+    def test_ghidra_stage_no_targets_skipped(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            task = Path(tmp) / "t"
+            write_json(task / "reports" / "analysis.json", base_report())
+            summary = AnalysisPipelineController(tmp)._run_ghidra_stage("t", [])
+            self.assertEqual(summary["stage_status"], "skipped")
+
+    def test_ghidra_stage_worker_unavailable_without_fallback_blocked(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            task = Path(tmp) / "t"
+            write_json(task / "reports" / "analysis.json", base_report())
+            binary = task / "rootfs" / "usr" / "sbin" / "dnsmasq"
+            binary.parent.mkdir(parents=True, exist_ok=True)
+            binary.write_bytes(b"\x7fELF")
+            controller = AnalysisPipelineController(tmp)
+            with patch("fwagent.pipeline.product.BinaryToolAPI", lambda *args, **kwargs: FakeGhidraAPI("failed")):
+                summary = controller._run_ghidra_stage("t", [{"path": "/usr/sbin/dnsmasq", "host_path": str(binary), "exists": True}])
+            self.assertEqual(summary["stage_status"], "blocked")
+            self.assertFalse(summary["success"])
 
     def test_report_json_includes_coverage(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -153,6 +325,29 @@ class DeepDuckV01IntegrationTests(unittest.TestCase):
             model = ReportGenerator(tmp, "t").build_model({"findings": []})
             path = ReportGenerator(tmp, "t").generate_markdown(model)
             self.assertIn("# DeepDuck Firmware Security Analysis Report", path.read_text(encoding="utf-8"))
+
+    def test_report_coverage_separates_real_ghidra_and_fallback(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            task = Path(tmp) / "t"
+            write_json(task / "reports" / "analysis.json", base_report())
+            write_json(
+                task / "pipeline_stages.json",
+                {
+                    "stages": [],
+                    "coverage": {
+                        "stage_ghidra_analysis": "partial",
+                        "real_ghidra_status": "blocked",
+                        "real_ghidra_completed": 0,
+                        "static_elf_fallback_completed": 2,
+                    },
+                    "validation_gaps": [],
+                },
+            )
+            model = ReportGenerator(tmp, "t").build_model({"findings": []})
+            text = ReportGenerator(tmp, "t").generate_markdown(model).read_text(encoding="utf-8")
+
+            self.assertIn("Real Ghidra analysis: `blocked`", text)
+            self.assertIn("Static ELF fallback analysis: `2`", text)
 
     def test_report_markdown_has_fourteen_artifact_section(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -195,6 +390,28 @@ class DeepDuckV01IntegrationTests(unittest.TestCase):
         builder = ComponentGraphBuilder(tempfile.mkdtemp(), "t", config=AnalysisPipelineController(tempfile.mkdtemp()).config)
         builder._ingest_binaries(base_report())
         self.assertTrue(any(component.name == "strcpy" for component in builder.graph.components.values()))
+
+    def test_component_graph_consumes_real_ghidra_evidence_ids(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            task = Path(tmp) / "t"
+            report = base_report()
+            report["binaries"][0]["ghidra"] = {
+                "real_ghidra": True,
+                "backend_used": "dockerized_ghidra",
+                "functions": ["main"],
+                "evidence_ids": ["SE-GHIDRA-dnsmasq-SUMMARY"],
+            }
+            write_json(task / "reports" / "analysis.json", report)
+            result = ComponentGraphBuilder(tmp, "t", config=AnalysisPipelineController(tmp).config).build()
+
+            self.assertTrue(
+                any(
+                    rel.get("relationship_type") == "contains"
+                    and rel.get("source_type") == "static_reference"
+                    and "SE-GHIDRA-dnsmasq-SUMMARY" in rel.get("evidence_ids", [])
+                    for rel in result["relationships"]
+                )
+            )
 
     def test_service_ingest_accepts_non_lighttpd(self) -> None:
         builder = ComponentGraphBuilder(tempfile.mkdtemp(), "t", config=AnalysisPipelineController(tempfile.mkdtemp()).config)
@@ -267,12 +484,26 @@ class DeepDuckV01IntegrationTests(unittest.TestCase):
         evidence = _ghidra_evidence_for_result({"success": True, "target": {"path": "/bin/httpd"}, "result": {"imports": [{"name": "system", "dangerous": True}], "metadata": {"fallback": True}}})
         self.assertFalse(evidence[0].runtime_observation_real)
 
+    def test_static_fallback_evidence_cannot_claim_decompiler_provenance(self) -> None:
+        evidence = _ghidra_evidence_for_result({"success": True, "target": {"path": "/bin/httpd"}, "result": {"imports": [{"name": "system", "dangerous": True}], "metadata": {"fallback": True, "fallback_reason": "GHIDRA_ANALYZE_HEADLESS_NOT_FOUND"}}})
+
+        self.assertTrue(evidence)
+        self.assertEqual(evidence[0].metadata["execution_mode"], "static_elf_fallback")
+        self.assertEqual(evidence[0].metadata["provenance"], "static_elf_fallback")
+        self.assertEqual(evidence[0].metadata["fallback_reason"], "GHIDRA_ANALYZE_HEADLESS_NOT_FOUND")
+
     def test_artifact_outputs_from_report_tuple(self) -> None:
         outputs = _artifact_outputs(({"report_path": "reports/analysis.json"}, Path("artifact_manifest.json")))
         self.assertIn("reports/analysis.json", outputs)
 
     def test_items_processed_from_summary_dict(self) -> None:
         self.assertEqual(_items_processed({"items_processed": 7}), 7)
+
+    def test_items_processed_from_component_summary(self) -> None:
+        self.assertEqual(_items_processed({"total_components": 156, "total_relationships": 257}), 156)
+
+    def test_items_processed_from_nested_component_summary(self) -> None:
+        self.assertEqual(_items_processed({"summary": {"total_components": 156, "total_relationships": 257}}), 156)
 
     def test_pipeline_artifact_records_provider_backed_false(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

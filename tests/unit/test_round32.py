@@ -4,6 +4,7 @@ import json
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 from fwagent.dynamic.api import DynamicToolAPI
 from fwagent.dynamic.backend import QemuUserServiceBackend
@@ -82,6 +83,26 @@ class Round32Tests(unittest.TestCase):
             self.assertTrue((service_rootfs / "tmp").exists())
             self.assertTrue((service_rootfs / "var" / "run").exists())
 
+    def test_prepare_service_rootfs_repairs_inaccessible_writable_path(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            rootfs = _make_lighttpd_rootfs(root / "source")
+            profile = reconstruct_service_startup(rootfs, "lighttpd")
+            service_rootfs = root / "runtime" / "lighttpd"
+            original_exists = Path.exists
+
+            def flaky_exists(path: Path) -> bool:
+                if path == service_rootfs / "var" / "log":
+                    raise OSError("inaccessible copied runtime path")
+                return original_exists(path)
+
+            with patch.object(Path, "exists", flaky_exists):
+                result = prepare_service_rootfs(rootfs, service_rootfs, profile)
+
+            self.assertTrue(result["success"])
+            self.assertTrue(any(repair["target"] == "/var/log" for repair in result["repairs"]))
+            self.assertTrue((service_rootfs / "var" / "log").exists())
+
     def test_service_failure_classification(self) -> None:
         self.assertEqual(classify_service_failure("", "can't load library libc.so.0", 1), "missing_library")
         self.assertEqual(classify_service_failure("", "Address already in use", 1), "port_in_use")
@@ -121,6 +142,28 @@ class Round32Tests(unittest.TestCase):
             self.assertIn("dynamic.start_service", api.tools)
             for forbidden in ("shell", "bash", "docker", "qemu-arm-static"):
                 self.assertNotIn(forbidden, api.tools)
+
+    def test_backend_rootfs_falls_back_to_workspace_relative_canonical_path(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            task = root / "task"
+            rootfs = _make_lighttpd_rootfs(task / "docker-extract" / "rootfs")
+            (task / "reports").mkdir(parents=True)
+            (task / "reports" / "analysis.json").write_text(
+                json.dumps(
+                    {
+                        "extraction": {
+                            "rootfs": "Z:\\unavailable\\windows\\rootfs",
+                            "canonical_rootfs": {"workspace_relative_path": "docker-extract/rootfs"},
+                        }
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            backend = QemuUserServiceBackend(task)
+
+            self.assertEqual(backend._rootfs(), rootfs.resolve())
 
     def test_service_evidence_types_are_allowed(self) -> None:
         for evidence_type in (

@@ -5,7 +5,18 @@ import unittest
 from pathlib import Path
 
 from fwagent.config import GhidraSettings
+from fwagent.models import CommandResult
 from fwagent.runtime.ghidra import GhidraRuntime
+
+
+class FakeRunner:
+    def __init__(self, result: CommandResult):
+        self.result = result
+        self.commands: list[list[str]] = []
+
+    def run(self, command: list[str], *, timeout: int | None = None, cwd: Path | None = None, env: dict[str, str] | None = None) -> CommandResult:
+        self.commands.append(command)
+        return self.result
 
 
 class GhidraRuntimeTests(unittest.TestCase):
@@ -40,6 +51,32 @@ class GhidraRuntimeTests(unittest.TestCase):
             runtime = GhidraRuntime(base / "workspace", settings=GhidraSettings(home=base / "missing"))
 
             self.assertEqual(runtime.cache_key(binary), runtime.cache_key(binary))
+
+    def test_container_environment_check_reports_dockerized_ghidra(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            runner = FakeRunner(
+                CommandResult(
+                    command=[],
+                    exit_code=0,
+                    stdout='openjdk version "21.0.8"\nGHIDRA_HOME=/opt/ghidra\nANALYZE_HEADLESS=/opt/ghidra/support/analyzeHeadless\nGhidra 12.1.3\n',
+                    stderr="",
+                    duration=0.2,
+                )
+            )
+            runtime = GhidraRuntime(
+                Path(tmp),
+                settings=GhidraSettings(home=Path("missing-ghidra"), docker_image="fwagent-round2:latest"),
+                runner=runner,
+            )
+
+            result = runtime.check_container_environment()
+
+            self.assertTrue(result["success"])
+            self.assertEqual(result["result"]["image"], "fwagent-round2:latest")
+            self.assertEqual(result["result"]["java_version"], "21.0.8")
+            self.assertEqual(result["result"]["ghidra_version"], "12.1.3")
+            self.assertEqual(result["result"]["analyze_headless"], "/opt/ghidra/support/analyzeHeadless")
+            self.assertIn("--network", runner.commands[0])
 
 
 if __name__ == "__main__":

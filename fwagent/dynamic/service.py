@@ -237,8 +237,8 @@ def prepare_service_rootfs(
     repairs: list[RuntimeRepair] = []
     for index, path in enumerate(profile.writable_paths, start=1):
         candidate = _root_path(target, path)
-        if not candidate.exists():
-            candidate.mkdir(parents=True, exist_ok=True)
+        if not _path_is_real_directory(candidate):
+            _materialize_directory(target, candidate)
             repairs.append(
                 RuntimeRepair(
                     id=f"RR-{len(repairs) + 1:04d}",
@@ -254,6 +254,44 @@ def prepare_service_rootfs(
         "reused": reused,
         "repairs": [repair.to_dict() for repair in repairs],
     }
+
+
+def _path_exists(path: Path) -> bool:
+    try:
+        return path.exists()
+    except OSError:
+        return False
+
+
+def _path_is_real_directory(path: Path) -> bool:
+    try:
+        return path.is_dir() and not path.is_symlink()
+    except OSError:
+        return False
+
+
+def _materialize_directory(root: Path, target: Path) -> None:
+    relative = target.relative_to(root)
+    current = root
+    for part in relative.parts:
+        current = current / part
+        if _path_is_real_directory(current):
+            continue
+        _remove_inaccessible_path(current)
+        current.mkdir(parents=True, exist_ok=True)
+
+
+def _remove_inaccessible_path(path: Path) -> None:
+    try:
+        if path.is_dir() and not path.is_symlink():
+            shutil.rmtree(path, ignore_errors=True)
+            return
+    except OSError:
+        pass
+    try:
+        path.unlink(missing_ok=True)
+    except OSError:
+        shutil.rmtree(path, ignore_errors=True)
 
 
 def classify_service_failure(stdout: str, stderr: str, exit_code: int | None, timed_out: bool = False) -> str:

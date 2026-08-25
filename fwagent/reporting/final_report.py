@@ -240,6 +240,8 @@ class ReportGenerator:
             f"- Inventory stage: `{coverage.get('stage_rootfs_inventory') or 'not recorded'}`",
             f"- Static target stage: `{coverage.get('stage_static_target_selection') or 'not recorded'}`",
             f"- Ghidra stage: `{coverage.get('stage_ghidra_analysis') or 'not recorded'}`",
+            f"- Real Ghidra analysis: `{coverage.get('real_ghidra_status') or 'not recorded'}`",
+            f"- Static ELF fallback analysis: `{coverage.get('static_elf_fallback_completed', 0)}`",
             f"- Rootfs files: `{coverage.get('rootfs_files', 0)}`",
             f"- ELF binaries: `{coverage.get('elf_binaries', 0)}`",
             f"- Web files: `{coverage.get('web_files', 0)}`",
@@ -282,7 +284,9 @@ class ReportGenerator:
                 "",
                 f"- Scheduled: `{coverage.get('ghidra_targets_scheduled', 0)}`",
                 f"- Completed with real Ghidra: `{coverage.get('real_ghidra_completed', 0)}`",
+                f"- Static ELF fallback completed: `{coverage.get('static_elf_fallback_completed', 0)}`",
                 f"- Fallback/blocked: `{coverage.get('ghidra_fallback_or_failed', 0)}`",
+                f"- Real Ghidra status: `{coverage.get('real_ghidra_status') or 'not recorded'}`",
                 "",
                 "## 8. Component Correlation",
                 "",
@@ -470,6 +474,7 @@ code {{ background: #e2e8f0; padding: .1rem .25rem; border-radius: 4px; }}
 <p>Canonical rootfs: <code>{html.escape(str(coverage.get('canonical_rootfs') or 'not established'))}</code></p>
 <p>Rootfs source: <code>{html.escape(str(coverage.get('rootfs_source') or 'not established'))}</code>; validated: <code>{html.escape(str(coverage.get('rootfs_validated', False)))}</code></p>
 <p>Extraction / Inventory / Target / Ghidra: <code>{html.escape(str(coverage.get('stage_extraction') or 'not recorded'))}</code> / <code>{html.escape(str(coverage.get('stage_rootfs_inventory') or 'not recorded'))}</code> / <code>{html.escape(str(coverage.get('stage_static_target_selection') or 'not recorded'))}</code> / <code>{html.escape(str(coverage.get('stage_ghidra_analysis') or 'not recorded'))}</code></p>
+<p>Real Ghidra: <code>{html.escape(str(coverage.get('real_ghidra_status') or 'not recorded'))}</code>; static ELF fallback completed: <code>{html.escape(str(coverage.get('static_elf_fallback_completed', 0)))}</code></p>
 <div class="cards">
 <div class="card"><strong>Rootfs Files</strong><br>{html.escape(str(coverage.get('rootfs_files', 0)))}</div>
 <div class="card"><strong>ELF Binaries</strong><br>{html.escape(str(coverage.get('elf_binaries', 0)))}</div>

@@ -31,6 +31,8 @@ class GhidraApiTests(unittest.TestCase):
             self.assertTrue(result["success"])
             self.assertEqual(result["result"]["summary"]["language"], "x86:LE:32:default")
             self.assertTrue(result["result"]["metadata"]["fallback"])
+            self.assertEqual(result["result"]["metadata"]["backend_used"], "static_elf_fallback")
+            self.assertIn("fallback_reason", result["result"]["metadata"])
             self.assertIn("warnings", result)
 
 

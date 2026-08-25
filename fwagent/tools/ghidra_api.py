@@ -89,19 +89,70 @@ class BinaryToolAPI:
         environment = self.runtime.check_environment()
         warnings: list[str] = []
         errors: list[str] = []
+        requested_backend = "ghidra"
+        backend_used = "unavailable"
+        fallback_reason = None
         if environment["success"]:
             ghidra_result = self.runtime.export_binary(binary_path).to_dict()
             if ghidra_result["success"]:
                 normalized = _normalize_ghidra_result(binary_path, ghidra_result["result"], self.runtime.ghidra_version())
+                normalized.setdefault("metadata", {}).update(
+                    {
+                        "requested_backend": requested_backend,
+                        "backend_used": "host_ghidra",
+                        "real_ghidra": True,
+                        "fallback": False,
+                        "fallback_used": False,
+                    }
+                )
                 self._save_cache(cache_path, normalized)
                 ghidra_result["duration"] = round(time.monotonic() - start, 3)
                 ghidra_result["result"] = normalized
                 return ghidra_result
             warnings.extend(ghidra_result.get("warnings", []))
             errors.extend(ghidra_result.get("errors", []))
+            fallback_reason = _fallback_reason_from_errors(errors, default="GHIDRA_SCRIPT_FAILED")
         else:
             warnings.extend(environment.get("warnings", []))
             errors.extend(environment.get("errors", []))
+            fallback_reason = _fallback_reason_from_errors(errors, default="GHIDRA_WORKER_UNAVAILABLE")
+
+        container_environment = self.runtime.check_container_environment()
+        if container_environment.get("success"):
+            container_result = self.runtime.export_binary_containerized(binary_path).to_dict()
+            if container_result["success"]:
+                result_payload = container_result.get("result") if isinstance(container_result.get("result"), dict) else {}
+                container_meta = container_environment.get("result") if isinstance(container_environment.get("result"), dict) else {}
+                normalized = _normalize_ghidra_result(binary_path, result_payload, str(container_meta.get("ghidra_version") or "containerized-ghidra"))
+                normalized.setdefault("metadata", {}).update(
+                    {
+                        "requested_backend": requested_backend,
+                        "backend_used": "dockerized_ghidra",
+                        "real_ghidra": True,
+                        "fallback": False,
+                        "fallback_used": False,
+                        "worker": {
+                            "type": "docker",
+                            "image": self.config.ghidra.docker_image,
+                            "java_version": container_meta.get("java"),
+                            "ghidra_version": container_meta.get("ghidra_version"),
+                            "analyze_headless": container_meta.get("analyze_headless"),
+                        },
+                    }
+                )
+                self._save_cache(cache_path, normalized)
+                container_result["duration"] = round(time.monotonic() - start, 3)
+                container_result["result"] = normalized
+                container_result["warnings"] = warnings + container_result.get("warnings", [])
+                return container_result
+            warnings.extend(container_result.get("warnings", []))
+            errors.extend(container_result.get("errors", []))
+            fallback_reason = _fallback_reason_from_errors(container_result.get("errors", []), default="GHIDRA_CONTAINER_FAILED")
+        else:
+            container_errors = container_environment.get("errors", [])
+            if container_errors:
+                warnings.extend([str(item) for item in container_errors])
+                fallback_reason = _fallback_reason_from_errors(container_errors, default=fallback_reason or "GHIDRA_CONTAINER_FAILED")
 
         if not allow_fallback:
             return ToolResult(
@@ -115,6 +166,23 @@ class BinaryToolAPI:
             ).to_dict()
 
         fallback = self._fallback_analyze(binary_path)
+        backend_used = "static_elf_fallback"
+        fallback.setdefault("metadata", {}).update(
+            {
+                "requested_backend": requested_backend,
+                "backend_used": backend_used,
+                "real_ghidra": False,
+                "fallback": True,
+                "fallback_used": True,
+                "fallback_reason": fallback_reason or "UNKNOWN_GHIDRA_FAILURE",
+                "ghidra_errors": errors,
+                "worker": {
+                    "type": "docker",
+                    "image": self.config.ghidra.docker_image,
+                    "available": bool(container_environment.get("success")),
+                },
+            }
+        )
         warnings.append("Ghidra unavailable or failed; used static ELF fallback")
         if errors:
             warnings.extend(errors)
@@ -225,7 +293,13 @@ class BinaryToolAPI:
             "strings": [{"value": value} for value in strings[:5000]],
             "callgraph": callgraph,
             "references": [],
-            "metadata": {"fallback": True},
+            "metadata": {
+                "requested_backend": "ghidra",
+                "backend_used": "static_elf_fallback",
+                "real_ghidra": False,
+                "fallback": True,
+                "fallback_used": True,
+            },
         }
 
     def _functions_from_nm(self, binary: Path) -> list[dict[str, Any]]:
@@ -356,7 +430,7 @@ def _normalize_ghidra_result(binary: Path, result: dict[str, Any], version: str)
         "strings": strings,
         "callgraph": callgraph,
         "references": result.get("references", []),
-        "metadata": {"fallback": False},
+        "metadata": {"fallback": False, "fallback_used": False, "real_ghidra": True},
     }
 
 
@@ -397,3 +471,24 @@ def _wrap(tool: str, binary: str | Path, analysis: dict[str, Any], result: dict[
 def _load_json(path: Path) -> dict[str, Any]:
     with path.open("r", encoding="utf-8") as handle:
         return json.load(handle)
+
+
+def _fallback_reason_from_errors(errors: list[Any], *, default: str) -> str:
+    text = "\n".join(str(item) for item in errors).lower()
+    if "analyzeheadless" in text and ("not found" in text or "no such file" in text):
+        return "GHIDRA_ANALYZE_HEADLESS_NOT_FOUND"
+    if "permission denied" in text or "access is denied" in text or "docker_engine" in text:
+        return "GHIDRA_CONTAINER_DOCKER_PERMISSION_DENIED"
+    if "timeout" in text or "timed out" in text:
+        return "GHIDRA_TIMEOUT"
+    if "image" in text and ("not found" in text or "pull access denied" in text):
+        return "GHIDRA_WORKER_IMAGE_NOT_FOUND"
+    if "missing export files" in text:
+        return "GHIDRA_OUTPUT_MISSING"
+    if "import" in text and "failed" in text:
+        return "GHIDRA_IMPORT_FAILED"
+    if "script" in text and "failed" in text:
+        return "GHIDRA_SCRIPT_FAILED"
+    if "container" in text or "docker" in text:
+        return "GHIDRA_CONTAINER_FAILED"
+    return default

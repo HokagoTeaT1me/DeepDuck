@@ -51,6 +51,20 @@ class Round35Backend:
         }
 
 
+class BlockedRound35Backend(Round35Backend):
+    def validate_fastcgi_integration(self, backend="device_manager", *, endpoint="/services/device_manager/", stability_seconds=3):
+        return {
+            "success": False,
+            "backend": backend,
+            "endpoint": endpoint,
+            "runtime_environment_blocked": True,
+            "diagnosis": "RUNTIME_ENVIRONMENT_BLOCKED",
+            "backend_child": {"started": False, "alive_after_startup": False},
+            "request_observations": [],
+            "application_response_reached": False,
+        }
+
+
 def _snapshot(mode: str) -> FastCGIRuntimeSnapshot:
     standalone = mode == "standalone"
     return FastCGIRuntimeSnapshot(
@@ -176,6 +190,17 @@ class Round35Tests(unittest.TestCase):
     def test_blocked_and_inconclusive_semantics_are_available(self) -> None:
         self.assertIn("fastcgi_validation_blocked", DYNAMIC_EVIDENCE_TYPES)
         self.assertIn("fastcgi_validation_inconclusive", DYNAMIC_EVIDENCE_TYPES)
+
+    def test_blocked_fastcgi_integration_is_not_real_runtime_observation(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            api = DynamicToolAPI(Path(tmp), "task", backend=BlockedRound35Backend())
+            result = api.execute("dynamic.validate_fastcgi_integration", {"backend": "device_manager"})
+            evidence = api.evidence[-1]
+
+        self.assertFalse(result["success"])
+        self.assertEqual(evidence.type, "fastcgi_validation_blocked")
+        self.assertFalse(evidence.runtime_observation_real)
+        self.assertEqual(evidence.provenance, "real_runtime_attempt")
 
     def test_cli_wiring(self) -> None:
         parser = build_parser()

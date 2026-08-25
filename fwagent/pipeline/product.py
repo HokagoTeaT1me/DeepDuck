@@ -24,6 +24,7 @@ from fwagent.findings import FindingFinalizer
 from fwagent.pipeline.analyzer import analyze_firmware
 from fwagent.reporting.final_report import ReportGenerator, ReportValidator, REPORT_SCHEMA_VERSION
 from fwagent.reporting.json_report import load_analysis_json, save_analysis_json
+from fwagent.runtime.ghidra import GhidraRuntime
 from fwagent.tools import analyze_binaries, discover_services, discover_web_surface, identify_architecture, inventory_filesystem, rank_binaries, scan_sensitive_files
 from fwagent.tools.common import sha256_file
 from fwagent.tools.extractor import find_rootfs_candidates
@@ -410,25 +411,42 @@ class AnalysisPipelineController:
         try:
             value = func()
             outputs = _artifact_outputs(value)
+            if stage == "STATIC_TARGET_SELECTION" and not outputs:
+                outputs = ["ghidra/targets.json"]
             items = _items_processed(value)
             status = "completed"
             blocking_reason = None
             partial_reason = None
             items_failed = 0
             items_skipped = 0
+            items_succeeded = items
+            if isinstance(value, dict):
+                if value.get("stage_status"):
+                    status = str(value.get("stage_status"))
+                if "items_succeeded" in value:
+                    items_succeeded = int(value.get("items_succeeded") or 0)
+                if "items_failed" in value:
+                    items_failed = int(value.get("items_failed") or 0)
+                if "items_skipped" in value:
+                    items_skipped = int(value.get("items_skipped") or 0)
             if isinstance(value, dict) and value.get("success") is False:
-                status = str(value.get("stage_status") or ("blocked" if value.get("blocking_reason") else "partial"))
+                status = str(value.get("stage_status") or status or ("blocked" if value.get("blocking_reason") else "partial"))
                 blocking_reason = value.get("blocking_reason")
                 partial_reason = value.get("partial_reason") or value.get("error")
+                if "items_succeeded" not in value:
+                    items_succeeded = 0
                 if status in {"blocked", "skipped"}:
                     items_skipped = items or 1
                 else:
                     items_failed = items
+            elif isinstance(value, dict) and status in {"partial", "blocked", "skipped"}:
+                blocking_reason = value.get("blocking_reason")
+                partial_reason = value.get("partial_reason") or value.get("error")
             result.finish(
                 status,
                 output_artifacts=outputs,
                 items_processed=items,
-                items_succeeded=0 if items_failed else items,
+                items_succeeded=items_succeeded,
                 items_failed=items_failed,
                 items_skipped=items_skipped,
                 blocking_reason=blocking_reason,
@@ -485,6 +503,10 @@ class AnalysisPipelineController:
 
     def _environment_stage(self, task: AnalysisTask) -> dict[str, Any]:
         task_dir = self.workspace_root / task.task_id
+        ghidra_runtime = GhidraRuntime(task_dir / "environment_check", settings=self.round2_config.ghidra)
+        host_ghidra = ghidra_runtime.check_environment()
+        container_ghidra = ghidra_runtime.check_container_environment()
+        container_errors = container_ghidra.get("errors", [])
         payload = {
             "success": True,
             "product": "DeepDuck",
@@ -492,6 +514,14 @@ class AnalysisPipelineController:
             "provider_backed": False,
             "real_model_validation": "deferred",
             "ghidra_home": str(self.round2_config.ghidra.home),
+            "docker": "PASS" if container_ghidra.get("success") else "BLOCKED",
+            "containerized_ghidra": "PASS" if container_ghidra.get("success") else "BLOCKED",
+            "containerized_ghidra_check": container_ghidra,
+            "host_ghidra": "PASS" if host_ghidra.get("success") else "OPTIONAL_NOT_REQUIRED",
+            "host_ghidra_check": host_ghidra,
+            "static_elf_fallback": "available",
+            "ghidra_worker_image": self.round2_config.ghidra.docker_image,
+            "ghidra_blocking_reason": "; ".join(str(item) for item in container_errors) if container_errors else None,
             "deepduck_console": True,
         }
         path = task_dir / "environment.json"
@@ -898,28 +928,94 @@ class AnalysisPipelineController:
         existing_ids = {item.id for item in evidence}
         for target in targets:
             if not target.get("exists"):
-                analyses.append({"target": target, "success": False, "errors": ["target does not exist"]})
+                analyses.append(
+                    {
+                        "target": target,
+                        "success": False,
+                        "errors": ["target does not exist"],
+                        "requested_backend": "ghidra",
+                        "backend_used": "none",
+                        "real_ghidra": False,
+                        "fallback_used": False,
+                        "fallback_reason": "TARGET_NOT_FOUND",
+                        "status": "failed",
+                    }
+                )
                 continue
             result = api.analyze_binary(target["host_path"], allow_fallback=True)
             result["target"] = target
+            backend = _ghidra_backend_details(result)
+            result.update(backend)
             analyses.append(result)
+            evidence_ids_for_target = []
             for item in _ghidra_evidence_for_result(result):
+                evidence_ids_for_target.append(item.id)
                 if item.id not in existing_ids:
                     evidence.append(item)
                     existing_ids.add(item.id)
+            result["evidence_ids"] = evidence_ids_for_target
         DynamicWorkspace(self.workspace_root, task_id).save_evidence(evidence)
+        scheduled = len(targets)
+        analyzed = sum(1 for item in analyses if item.get("success"))
+        failed = sum(1 for item in analyses if not item.get("success"))
+        real_completed = sum(1 for item in analyses if item.get("real_ghidra") and item.get("success"))
+        fallback_completed = sum(1 for item in analyses if item.get("fallback_used") and item.get("success"))
+        timed_out = sum(1 for item in analyses if item.get("fallback_reason") == "GHIDRA_TIMEOUT" or any("timeout" in str(error).lower() for error in item.get("errors", [])))
+        if scheduled == 0:
+            stage_status = "skipped"
+            partial_reason = None
+            blocking_reason = "no static targets"
+        elif real_completed == scheduled:
+            stage_status = "completed"
+            partial_reason = None
+            blocking_reason = None
+        elif real_completed > 0:
+            stage_status = "partial"
+            partial_reason = f"{real_completed}/{scheduled} targets completed with real Ghidra; {scheduled - real_completed} targets used fallback or failed"
+            blocking_reason = None
+        elif fallback_completed > 0:
+            stage_status = "partial"
+            partial_reason = f"0/{scheduled} targets completed with real Ghidra; {fallback_completed} targets analyzed using static ELF fallback"
+            blocking_reason = None
+        else:
+            stage_status = "blocked"
+            partial_reason = None
+            blocking_reason = "real Ghidra worker unavailable and no fallback analysis completed"
+        fallback_reasons: dict[str, int] = {}
+        for item in analyses:
+            reason = item.get("fallback_reason")
+            if reason:
+                fallback_reasons[str(reason)] = fallback_reasons.get(str(reason), 0) + 1
+        worker_detail = _first_ghidra_worker_detail(analyses)
         summary = {
-            "success": True,
+            "success": stage_status not in {"blocked", "failed"},
+            "stage_status": stage_status,
+            "partial_reason": partial_reason,
+            "blocking_reason": blocking_reason,
             "provider_backed": False,
             "targets": targets,
             "analyses": analyses,
-            "selected_binary_count": len(targets),
-            "analyzed_binary_count": sum(1 for item in analyses if item.get("success")),
-            "failed_binary_count": sum(1 for item in analyses if not item.get("success")),
-            "real_ghidra_count": sum(1 for item in analyses if not (((item.get("result") or {}).get("metadata") or {}).get("fallback")) and item.get("success")),
-            "fallback_count": sum(1 for item in analyses if (((item.get("result") or {}).get("metadata") or {}).get("fallback")) and item.get("success")),
+            "worker": "dockerized_ghidra_preferred",
+            "worker_detail": worker_detail,
+            "java_version": worker_detail.get("java_version"),
+            "ghidra_version": worker_detail.get("ghidra_version"),
+            "analyze_headless": worker_detail.get("analyze_headless"),
+            "selected_binary_count": scheduled,
+            "scheduled": scheduled,
+            "analyzed_binary_count": analyzed,
+            "failed_binary_count": failed,
+            "real_ghidra_count": real_completed,
+            "real_completed": real_completed,
+            "fallback_count": fallback_completed,
+            "fallback_completed": fallback_completed,
+            "timeout_count": timed_out,
+            "real_success_rate": round(real_completed / scheduled, 3) if scheduled else 0.0,
+            "fallback_reasons": fallback_reasons,
             "output_artifacts": ["ghidra/analysis_summary.json", "dynamic/evidence/evidence.json"],
-            "items_processed": len(targets),
+            "items_processed": scheduled,
+            "items_succeeded": real_completed,
+            "items_failed": failed,
+            "items_skipped": 0,
         }
         (ghidra_dir / "analysis_summary.json").write_text(json.dumps(summary, indent=2, sort_keys=True) + "\n", encoding="utf-8")
         (ghidra_dir / "evidence.json").write_text(json.dumps([item.to_dict() for item in evidence], indent=2, sort_keys=True) + "\n", encoding="utf-8")
@@ -938,9 +1034,14 @@ class AnalysisPipelineController:
             binary["ghidra"] = {
                 "success": bool(analysis.get("success")),
                 "fallback": bool((result.get("metadata") or {}).get("fallback")),
+                "real_ghidra": bool(analysis.get("real_ghidra")),
+                "backend_used": analysis.get("backend_used"),
+                "fallback_reason": analysis.get("fallback_reason"),
                 "function_count": (result.get("summary") or {}).get("function_count", 0),
+                "functions": [item.get("name") for item in result.get("functions", []) if item.get("name")],
                 "import_count": len(result.get("imports") or []),
                 "callgraph_edges": len(result.get("callgraph") or []),
+                "evidence_ids": analysis.get("evidence_ids", []),
             }
             imported_dangerous = [item.get("name") for item in result.get("imports", []) if item.get("dangerous")]
             if imported_dangerous:
@@ -994,6 +1095,15 @@ class AnalysisPipelineController:
         ghidra_real = ghidra.get("real_ghidra_count", 0)
         ghidra_failed = ghidra.get("failed_binary_count", 0)
         ghidra_fallback = ghidra.get("fallback_count", 0)
+        real_ghidra_status = "not_scheduled"
+        if ghidra_scheduled and ghidra_real == ghidra_scheduled:
+            real_ghidra_status = "completed"
+        elif ghidra_scheduled and ghidra_real > 0:
+            real_ghidra_status = "partial"
+        elif ghidra_scheduled and ghidra_fallback > 0:
+            real_ghidra_status = "blocked"
+        elif ghidra_scheduled:
+            real_ghidra_status = "failed"
         return {
             "canonical_rootfs": rootfs.get("workspace_relative_path") or rootfs.get("path"),
             "extraction_method": rootfs.get("extraction_method") or (report.get("extraction") or {}).get("extractor"),
@@ -1014,6 +1124,11 @@ class AnalysisPipelineController:
             "deep_static_enabled": self.product_config.deep_static_analysis.enabled,
             "ghidra_targets_scheduled": ghidra_scheduled,
             "real_ghidra_completed": ghidra_real,
+            "real_ghidra_status": real_ghidra_status,
+            "static_elf_fallback_completed": ghidra_fallback,
+            "ghidra_timeout": ghidra.get("timeout_count", 0),
+            "ghidra_real_success_rate": ghidra.get("real_success_rate", 0.0),
+            "ghidra_fallback_reasons": ghidra.get("fallback_reasons", {}),
             "ghidra_fallback_or_failed": ghidra_fallback + ghidra_failed,
             "total_files": filesystem.get("total_files", 0),
             "total_elf": filesystem.get("elf_files", 0),
@@ -1050,6 +1165,14 @@ class AnalysisPipelineController:
             gaps.append("Docker extraction execution could not be revalidated in the current environment due to Docker API permission restrictions.")
         if coverage.get("rootfs_source") == "imported" and coverage.get("rootfs_validated"):
             gaps.append("Canonical rootfs handoff, inventory, ELF discovery, and Ghidra scheduling were validated using a previously extracted real firmware rootfs.")
+        if coverage.get("ghidra_targets_scheduled", 0) > 0:
+            scheduled = int(coverage.get("ghidra_targets_scheduled", 0) or 0)
+            real = int(coverage.get("real_ghidra_completed", 0) or 0)
+            fallback = int(coverage.get("static_elf_fallback_completed", 0) or 0)
+            if real == 0 and fallback > 0:
+                gaps.append(f"GHIDRA_ANALYSIS: real Ghidra analyzeHeadless did not complete for any selected target; static ELF fallback was used for {fallback}/{scheduled} targets.")
+            elif 0 < real < scheduled:
+                gaps.append(f"GHIDRA_ANALYSIS: {real}/{scheduled} real targets completed; {scheduled - real} used fallback or failed.")
         if coverage.get("candidate_taint_paths", 0) and not coverage.get("supported_taint_paths", 0):
             gaps.append("TAINT_CORRELATION: candidate source/sink paths exist but argument-level data-flow support is unresolved")
         return gaps
@@ -1470,13 +1593,19 @@ def _artifact_outputs(value: Any) -> list[str]:
 def _items_processed(value: Any) -> int:
     if isinstance(value, tuple) and value and isinstance(value[0], dict):
         value = value[0]
+    if isinstance(value, list):
+        return len(value)
     if not isinstance(value, dict):
         return 0
     if "items_processed" in value:
         return int(value.get("items_processed") or 0)
-    for key in ("analyzed_binary_count", "selected_binary_count", "files_extracted"):
+    for key in ("analyzed_binary_count", "selected_binary_count", "selected_static_targets", "files_extracted", "total_components", "component_count", "total_relationships", "relationship_count"):
         if key in value:
             return int(value.get(key) or 0)
+    summary = value.get("summary") if isinstance(value.get("summary"), dict) else {}
+    for key in ("total_components", "component_count", "total_relationships", "relationship_count"):
+        if key in summary:
+            return int(summary.get(key) or 0)
     if "targets" in value and isinstance(value["targets"], list):
         return len(value["targets"])
     return 0
@@ -1563,6 +1692,10 @@ def _ghidra_evidence_for_result(result: dict[str, Any]) -> list[DynamicEvidence]
     target = result.get("target") or {}
     rel = str(target.get("path") or Path(str(result.get("binary", "binary"))).name)
     payload = result.get("result") or {}
+    metadata = payload.get("metadata") or {}
+    real_ghidra = bool(metadata.get("real_ghidra")) and not bool(metadata.get("fallback"))
+    evidence_execution_mode = "real" if real_ghidra else "static_elf_fallback"
+    evidence_provenance = "real_ghidra" if real_ghidra else "static_elf_fallback"
     imports = payload.get("imports") or []
     evidences: list[DynamicEvidence] = []
     safe_slug = "".join(ch if ch.isalnum() else "-" for ch in rel.strip("/"))[:48].strip("-") or "binary"
@@ -1576,13 +1709,18 @@ def _ghidra_evidence_for_result(result: dict[str, Any]) -> list[DynamicEvidence]
             target=rel,
             metadata={
                 "binary": rel,
-                "fallback": bool((payload.get("metadata") or {}).get("fallback")),
+                "tool": "ghidra",
+                "execution_mode": evidence_execution_mode,
+                "provenance": evidence_provenance,
+                "fallback": bool(metadata.get("fallback")),
+                "backend_used": metadata.get("backend_used"),
+                "fallback_reason": metadata.get("fallback_reason"),
                 "function_count": (payload.get("summary") or {}).get("function_count", 0),
                 "import_count": len(imports),
                 "callgraph_edges": len(payload.get("callgraph") or []),
             },
-            provenance="real_static_analysis",
-            execution_mode="real",
+            provenance=evidence_provenance,
+            execution_mode=evidence_execution_mode,
             provider_backed=False,
             runtime_observation_real=False,
         )
@@ -1599,11 +1737,71 @@ def _ghidra_evidence_for_result(result: dict[str, Any]) -> list[DynamicEvidence]
                 source_tool="ghidra.analyze_binary",
                 confidence=0.68,
                 target=rel,
-                metadata={"binary": rel, "symbol": symbol, "source": "imports"},
-                provenance="real_static_analysis",
-                execution_mode="real",
+                metadata={
+                    "binary": rel,
+                    "symbol": symbol,
+                    "source": "imports",
+                    "tool": "ghidra",
+                    "execution_mode": evidence_execution_mode,
+                    "provenance": evidence_provenance,
+                    "backend_used": metadata.get("backend_used"),
+                    "fallback": bool(metadata.get("fallback")),
+                    "fallback_reason": metadata.get("fallback_reason"),
+                },
+                provenance=evidence_provenance,
+                execution_mode=evidence_execution_mode,
                 provider_backed=False,
                 runtime_observation_real=False,
             )
         )
     return evidences
+
+
+def _ghidra_backend_details(result: dict[str, Any]) -> dict[str, Any]:
+    payload = result.get("result") if isinstance(result.get("result"), dict) else {}
+    metadata = payload.get("metadata") if isinstance(payload.get("metadata"), dict) else {}
+    fallback_used = bool(metadata.get("fallback") or metadata.get("fallback_used"))
+    real_ghidra = bool(metadata.get("real_ghidra")) and not fallback_used and bool(result.get("success"))
+    fallback_reason = metadata.get("fallback_reason")
+    errors = result.get("errors") or []
+    if fallback_used and not fallback_reason:
+        fallback_reason = "UNKNOWN_GHIDRA_FAILURE"
+    if not result.get("success") and not fallback_reason:
+        fallback_reason = _ghidra_failure_reason(errors)
+    return {
+        "requested_backend": metadata.get("requested_backend") or "ghidra",
+        "backend_used": metadata.get("backend_used") or ("static_elf_fallback" if fallback_used else "ghidra" if real_ghidra else "none"),
+        "real_ghidra": real_ghidra,
+        "fallback_used": fallback_used,
+        "fallback_reason": fallback_reason,
+        "ghidra_error": "; ".join(str(error) for error in errors[:3]) if errors else None,
+        "ghidra_exit_code": metadata.get("ghidra_exit_code"),
+        "status": "real_ghidra_completed" if real_ghidra else "fallback" if fallback_used and result.get("success") else "failed",
+        "evidence_ids": [],
+    }
+
+
+def _first_ghidra_worker_detail(analyses: list[dict[str, Any]]) -> dict[str, Any]:
+    for analysis in analyses:
+        metadata = (analysis.get("result") or {}).get("metadata") or {}
+        worker = metadata.get("worker")
+        if isinstance(worker, dict) and worker:
+            return dict(worker)
+    return {}
+
+
+def _ghidra_failure_reason(errors: list[Any]) -> str:
+    text = "\n".join(str(item) for item in errors).lower()
+    if "timeout" in text:
+        return "GHIDRA_TIMEOUT"
+    if "analyzeheadless" in text and ("not found" in text or "no such file" in text):
+        return "GHIDRA_ANALYZE_HEADLESS_NOT_FOUND"
+    if "permission denied" in text or "access is denied" in text or "docker_engine" in text:
+        return "GHIDRA_CONTAINER_DOCKER_PERMISSION_DENIED"
+    if "missing export" in text:
+        return "GHIDRA_OUTPUT_MISSING"
+    if "import" in text and "failed" in text:
+        return "GHIDRA_IMPORT_FAILED"
+    if "script" in text:
+        return "GHIDRA_SCRIPT_FAILED"
+    return "UNKNOWN_GHIDRA_FAILURE"

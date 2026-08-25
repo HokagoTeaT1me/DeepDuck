@@ -6,6 +6,7 @@ runtime:
 
 ghidra:
   config_version: 0.1
+  docker_image: fwagent-round2:latest
   home: /opt/ghidra
   project_dir: /workspace/ghidra_projects
   script_dir: /opt/fwagent/ghidra_scripts

@@ -1895,6 +1895,7 @@ class DynamicToolAPI:
     ) -> None:
         if evidence_type not in DYNAMIC_EVIDENCE_TYPES:
             return
+        runtime_observation_real = _is_real_runtime_observation(evidence_type, result)
         self.evidence.append(
             DynamicEvidence(
                 id=f"DE-{len(self.evidence) + 1:04d}",
@@ -1904,6 +1905,8 @@ class DynamicToolAPI:
                 source_tool=source_tool,
                 confidence=0.9,
                 metadata={"result_summary": json.dumps(_compact(result), ensure_ascii=True)[:1000]},
+                provenance="real_runtime_observation" if runtime_observation_real else "real_runtime_attempt",
+                runtime_observation_real=runtime_observation_real,
             )
         )
         self.workspace.save_evidence(self.evidence)
@@ -2153,6 +2156,56 @@ def _clamp(value: Any, default: float) -> float:
     except (TypeError, ValueError):
         return default
     return max(0.0, min(1.0, parsed))
+
+
+def _is_real_runtime_observation(evidence_type: str, result: dict[str, Any]) -> bool:
+    if evidence_type in {
+        "fastcgi_validation_blocked",
+        "fastcgi_validation_inconclusive",
+        "fastcgi_context_difference",
+        "fastcgi_runtime_context",
+        "fastcgi_runtime_difference",
+        "fastcgi_exit_code_explained",
+        "validation_blocked",
+        "validation_inconclusive",
+        "validation_rejected",
+        "validation_safety_stop",
+        "entry_validation_blocked",
+        "entry_validation_inconclusive",
+        "taint_validation_blocked",
+        "taint_validation_inconclusive",
+    }:
+        return False
+    if result.get("runtime_environment_blocked") or result.get("diagnosis") == "RUNTIME_ENVIRONMENT_BLOCKED":
+        return False
+    return evidence_type in {
+        "process_running",
+        "port_open",
+        "service_reachable",
+        "http_response",
+        "service_start_success",
+        "service_process_alive",
+        "service_port_listening",
+        "service_http_response",
+        "backend_start_success",
+        "backend_socket_ready",
+        "fastcgi_socket_ready",
+        "fastcgi_backend_alive",
+        "fastcgi_request_sent",
+        "fastcgi_response_received",
+        "fastcgi_child_started",
+        "fastcgi_request_received",
+        "fastcgi_application_response",
+        "fastcgi_integration_reachable",
+        "runtime_ready",
+        "baseline_response",
+        "validation_request",
+        "handler_reached",
+        "application_response",
+        "listener_observed",
+        "entry_runtime_confirmed",
+        "handler_reachable",
+    }
 
 
 def _application_backend_arg(args: dict[str, Any]) -> str:

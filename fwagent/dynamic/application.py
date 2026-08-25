@@ -1103,9 +1103,16 @@ def _endianness_from_file(output: str) -> str | None:
 
 def _find_library(rootfs: Path, library: str) -> bool:
     for directory in ("lib", "usr/lib", "usr/local/lib"):
-        if (rootfs / directory / library).exists():
+        if _path_exists(rootfs / directory / library):
             return True
     return False
+
+
+def _path_exists(path: Path) -> bool:
+    try:
+        return path.exists()
+    except OSError:
+        return False
 
 
 def _root_path(rootfs: Path, firmware_path: str) -> Path:

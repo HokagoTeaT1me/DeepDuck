@@ -38,6 +38,7 @@ class GhidraSettings:
     decompilation_mode: str = "on_demand"
     max_function_chars: int = 20000
     config_version: str = "0.1"
+    docker_image: str = "fwagent-round2:latest"
 
 
 @dataclass(frozen=True)
@@ -92,6 +93,7 @@ def load_round2_config(path: str | Path | None = None) -> Round2Config:
         decompilation_mode=str(ghidra_decompilation.get("mode", "on_demand")),
         max_function_chars=int(ghidra_decompilation.get("max_function_chars", 20000)),
         config_version=str(ghidra.get("config_version", "0.1")),
+        docker_image=str(os.environ.get("FWAGENT_GHIDRA_DOCKER_IMAGE", ghidra.get("docker_image", "fwagent-round2:latest"))),
     )
     return Round2Config(
         ghidra=settings,
