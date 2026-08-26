@@ -95,9 +95,12 @@ class BinaryToolAPI:
         if environment["success"]:
             ghidra_result = self.runtime.export_binary(binary_path).to_dict()
             if ghidra_result["success"]:
-                normalized = _normalize_ghidra_result(binary_path, ghidra_result["result"], self.runtime.ghidra_version())
+                ghidra_payload = ghidra_result["result"] if isinstance(ghidra_result.get("result"), dict) else {}
+                runtime_metadata = ghidra_payload.get("metadata", {}) if isinstance(ghidra_payload.get("metadata"), dict) else {}
+                normalized = _normalize_ghidra_result(binary_path, ghidra_payload, self.runtime.ghidra_version())
                 normalized.setdefault("metadata", {}).update(
                     {
+                        **runtime_metadata,
                         "requested_backend": requested_backend,
                         "backend_used": "host_ghidra",
                         "real_ghidra": True,
@@ -123,9 +126,11 @@ class BinaryToolAPI:
             if container_result["success"]:
                 result_payload = container_result.get("result") if isinstance(container_result.get("result"), dict) else {}
                 container_meta = container_environment.get("result") if isinstance(container_environment.get("result"), dict) else {}
+                runtime_metadata = result_payload.get("metadata", {}) if isinstance(result_payload.get("metadata"), dict) else {}
                 normalized = _normalize_ghidra_result(binary_path, result_payload, str(container_meta.get("ghidra_version") or "containerized-ghidra"))
                 normalized.setdefault("metadata", {}).update(
                     {
+                        **runtime_metadata,
                         "requested_backend": requested_backend,
                         "backend_used": "dockerized_ghidra",
                         "real_ghidra": True,
@@ -160,7 +165,17 @@ class BinaryToolAPI:
                 tool="ghidra.analyze_binary",
                 binary=str(binary_path),
                 duration=round(time.monotonic() - start, 3),
-                result={},
+                result={
+                    "metadata": {
+                        "requested_backend": requested_backend,
+                        "backend_used": "none",
+                        "real_ghidra": False,
+                        "fallback": False,
+                        "fallback_used": False,
+                        "fallback_reason": fallback_reason,
+                        "ghidra_errors": errors,
+                    }
+                },
                 warnings=warnings,
                 errors=errors,
             ).to_dict()

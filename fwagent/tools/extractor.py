@@ -9,7 +9,7 @@ from pathlib import Path
 from typing import Callable
 
 from fwagent.runtime.command import CommandRunner
-from fwagent.tools.common import is_within, iter_files, read_prefix
+from fwagent.tools.common import is_within, is_windows_reparse_point, iter_files, read_prefix, safe_exists, safe_is_dir
 
 
 def extract_firmware(
@@ -195,21 +195,29 @@ def find_rootfs_candidates(extract_dir: Path) -> list[Path]:
     directories = [extract_dir]
     for current, dirnames, _ in os.walk(extract_dir, followlinks=False):
         current_path = Path(current)
-        dirnames[:] = [name for name in dirnames if not (current_path / name).is_symlink()]
+        kept = []
+        for name in dirnames:
+            path = current_path / name
+            try:
+                if not path.is_symlink() and not is_windows_reparse_point(path):
+                    kept.append(name)
+            except OSError:
+                continue
+        dirnames[:] = kept
         if current_path != extract_dir:
             directories.append(current_path)
 
     for directory in directories:
         score = 0
-        if (directory / "etc" / "passwd").exists():
+        if safe_exists(directory / "etc" / "passwd"):
             score += 5
-        if (directory / "bin").is_dir() or (directory / "sbin").is_dir():
+        if safe_is_dir(directory / "bin") or safe_is_dir(directory / "sbin"):
             score += 3
-        if (directory / "usr" / "bin").is_dir() or (directory / "usr" / "sbin").is_dir():
+        if safe_is_dir(directory / "usr" / "bin") or safe_is_dir(directory / "usr" / "sbin"):
             score += 2
-        if (directory / "www").is_dir() or (directory / "htdocs").is_dir():
+        if safe_is_dir(directory / "www") or safe_is_dir(directory / "htdocs"):
             score += 2
-        if (directory / "etc" / "init.d").is_dir():
+        if safe_is_dir(directory / "etc" / "init.d"):
             score += 2
         if score:
             candidates.append((score, directory))
@@ -224,6 +232,6 @@ def find_rootfs_candidates(extract_dir: Path) -> list[Path]:
 
 
 def _count_files(root: Path) -> int:
-    if not root.exists():
+    if not safe_exists(root, allow_symlink=True):
         return 0
     return sum(1 for _ in iter_files(root))

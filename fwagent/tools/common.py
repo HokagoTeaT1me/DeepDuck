@@ -7,6 +7,7 @@ from pathlib import Path
 
 
 ELF_MAGIC = b"\x7fELF"
+FILE_ATTRIBUTE_REPARSE_POINT = 0x400
 
 
 def display_path(path: Path, root: Path | None = None) -> str:
@@ -29,9 +30,51 @@ def is_within(path: Path, parent: Path) -> bool:
 
 def iter_files(root: Path):
     for current, dirnames, filenames in os.walk(root, followlinks=False):
-        dirnames[:] = [name for name in dirnames if not (Path(current) / name).is_symlink()]
+        current_path = Path(current)
+        kept_dirs = []
+        for name in dirnames:
+            path = current_path / name
+            try:
+                if not path.is_symlink() and not is_windows_reparse_point(path):
+                    kept_dirs.append(name)
+            except OSError:
+                continue
+        dirnames[:] = kept_dirs
         for filename in filenames:
-            yield Path(current) / filename
+            path = current_path / filename
+            try:
+                if path.is_symlink() or is_windows_reparse_point(path):
+                    continue
+            except OSError:
+                continue
+            yield path
+
+
+def is_windows_reparse_point(path: Path) -> bool:
+    try:
+        return bool(path.stat(follow_symlinks=False).st_file_attributes & FILE_ATTRIBUTE_REPARSE_POINT)
+    except AttributeError:
+        return False
+    except OSError:
+        return True
+
+
+def safe_exists(path: Path, *, allow_symlink: bool = False) -> bool:
+    try:
+        if not allow_symlink and (path.is_symlink() or is_windows_reparse_point(path)):
+            return False
+        return path.exists()
+    except OSError:
+        return False
+
+
+def safe_is_dir(path: Path, *, allow_symlink: bool = False) -> bool:
+    try:
+        if not allow_symlink and (path.is_symlink() or is_windows_reparse_point(path)):
+            return False
+        return path.is_dir()
+    except OSError:
+        return False
 
 
 def read_prefix(path: Path, size: int = 4096) -> bytes:

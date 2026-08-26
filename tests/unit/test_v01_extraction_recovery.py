@@ -179,6 +179,19 @@ class ExtractionRecoveryTests(unittest.TestCase):
             self.assertNotEqual(artifact.host_path, artifact.container_path)
             self.assertIn("/repo/workspace/t/", artifact.container_path)
 
+    def test_host_safe_view_recorded_separately(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            task = Path(tmp) / "t"
+            rootfs = make_rootfs(task / "rootfs")
+            host_safe = make_rootfs(task / "host-safe-rootfs")
+
+            artifact = AnalysisPipelineController(tmp).import_extracted_rootfs("t", rootfs, host_safe_view=host_safe)
+
+            self.assertEqual(artifact.canonical_linux_rootfs, str(rootfs.resolve()))
+            self.assertEqual(artifact.host_safe_view, str(host_safe.resolve()))
+            self.assertFalse(artifact.linux_semantics_preserved)
+            self.assertEqual(artifact.semantic_fidelity, "host-safe-view")
+
     def test_windows_drive_path_normalized(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             task = Path(tmp) / "t"
@@ -360,6 +373,44 @@ class ExtractionRecoveryTests(unittest.TestCase):
                 errors = []
                 controller._ensure_canonical_rootfs("t", Path(tmp) / "fw.bin", stages(), {}, errors, timeout=1)
             self.assertEqual(errors[0]["code"], "DOCKER_PERMISSION_DENIED")
+
+    def test_docker_extract_uses_argv_for_parenthesized_names(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            firmware = Path(tmp) / "SR20(US).zip"
+            firmware.write_bytes(b"PK")
+            completed = unittest.mock.Mock(returncode=0, stdout="", stderr="")
+            controller = AnalysisPipelineController(tmp)
+
+            with patch("fwagent.pipeline.product.shutil.which", return_value="docker"), patch("fwagent.pipeline.product.subprocess.run", return_value=completed) as run, patch("fwagent.pipeline.product.find_rootfs_candidates", return_value=[]):
+                controller._docker_extract_rootfs("t", firmware, timeout=1)
+
+            command = run.call_args.args[0]
+            self.assertNotIn("-lc", command)
+            self.assertIn("binwalk", command)
+            self.assertIn("/input/SR20(US).zip", command)
+
+    def test_embedded_firmware_fallback_selected_after_archive_extract(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            task = Path(tmp) / "t"
+            write_analysis(task)
+            embedded = task / "extracted" / "SR20(US).bin"
+            embedded.parent.mkdir(parents=True)
+            embedded.write_bytes(b"x" * (1024 * 1024 + 1))
+            rootfs = make_rootfs(task / "docker-extract" / "_SR20.extracted" / "squashfs-root")
+            controller = AnalysisPipelineController(tmp)
+
+            with patch.object(
+                controller,
+                "_docker_extract_rootfs",
+                side_effect=[
+                    {"success": False, "error_code": "ROOTFS_NOT_FOUND", "error": "archive wrapper produced no rootfs"},
+                    {"success": True, "rootfs": str(rootfs), "method": "docker-binwalk", "validation": validate_rootfs_candidate(rootfs), "exit_code": 0},
+                ],
+            ):
+                artifact = controller._ensure_canonical_rootfs("t", Path(tmp) / "SR20(US).zip", stages(), {}, [], timeout=1)
+
+            self.assertIsNotNone(artifact)
+            self.assertEqual(artifact.extraction_method, "embedded-docker-binwalk")
 
     def test_score_prefers_markers_and_elf(self) -> None:
         self.assertGreater(score_rootfs_candidate(markers=["etc", "bin", "usr"], file_count=10, elf_count=2), score_rootfs_candidate(markers=["etc"], file_count=10, elf_count=0))

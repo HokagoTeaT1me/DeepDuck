@@ -11,7 +11,10 @@ public class ExportStrings extends GhidraScript {
         String output = args.length > 0 ? args[0] : "strings.json";
         StringBuilder json = new StringBuilder("[");
         boolean first = true;
-        Iterator<Data> iterator = DefinedDataIterator.definedStrings(currentProgram);
+        Iterator<Data> iterator = DefinedDataIterator.byDataInstance(
+            currentProgram,
+            data -> StringDataInstance.getStringDataInstance(data) != null
+        );
         while (iterator.hasNext()) {
             Data data = iterator.next();
             StringDataInstance instance = StringDataInstance.getStringDataInstance(data);
@@ -37,6 +40,39 @@ public class ExportStrings extends GhidraScript {
         if (value == null) {
             return "";
         }
-        return value.replace("\\", "\\\\").replace("\"", "\\\"").replace("\n", "\\n").replace("\r", "\\r");
+        StringBuilder escaped = new StringBuilder();
+        for (int index = 0; index < value.length(); index++) {
+            char character = value.charAt(index);
+            switch (character) {
+                case '\\':
+                    escaped.append("\\\\");
+                    break;
+                case '"':
+                    escaped.append("\\\"");
+                    break;
+                case '\b':
+                    escaped.append("\\b");
+                    break;
+                case '\f':
+                    escaped.append("\\f");
+                    break;
+                case '\n':
+                    escaped.append("\\n");
+                    break;
+                case '\r':
+                    escaped.append("\\r");
+                    break;
+                case '\t':
+                    escaped.append("\\t");
+                    break;
+                default:
+                    if (character < 0x20) {
+                        escaped.append(String.format("\\u%04x", (int) character));
+                    } else {
+                        escaped.append(character);
+                    }
+            }
+        }
+        return escaped.toString();
     }
 }

@@ -52,6 +52,9 @@ class GhidraRuntimeTests(unittest.TestCase):
 
             self.assertEqual(runtime.cache_key(binary), runtime.cache_key(binary))
 
+    def test_default_cache_key_version_invalidates_old_fallbacks(self) -> None:
+        self.assertEqual(GhidraSettings().config_version, "0.1-ghidra12-strings")
+
     def test_container_environment_check_reports_dockerized_ghidra(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             runner = FakeRunner(

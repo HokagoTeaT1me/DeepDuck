@@ -236,7 +236,7 @@ class GhidraRuntime:
             tool="ghidra.analyze_binary",
             binary=str(binary_path),
             duration=round(time.monotonic() - start, 3),
-            result=parsed,
+            result={**parsed, "metadata": _execution_metadata(command_result, backend="dockerized_ghidra", image=self.settings.docker_image)},
             warnings=warnings,
             errors=errors,
         )
@@ -307,7 +307,7 @@ class GhidraRuntime:
             tool="ghidra.analyze_binary",
             binary=str(binary_path),
             duration=round(time.monotonic() - start, 3),
-            result=parsed,
+            result={**parsed, "metadata": _execution_metadata(command_result, backend="host_ghidra", image=None)},
             warnings=warnings,
             errors=errors,
         )
@@ -428,3 +428,15 @@ def _classify_container_error(result) -> str:
     if "analyzeheadless" in text and ("not found" in text or "no such file" in text):
         return "GHIDRA_ANALYZE_HEADLESS_NOT_FOUND"
     return "GHIDRA_CONTAINER_FAILED"
+
+
+def _execution_metadata(result, *, backend: str, image: str | None) -> dict[str, Any]:
+    metadata: dict[str, Any] = {
+        "backend_used": backend,
+        "ghidra_exit_code": result.exit_code,
+        "timed_out": bool(result.timed_out),
+        "duration_seconds": round(float(result.duration), 3),
+    }
+    if image:
+        metadata["worker"] = {"type": "docker", "image": image}
+    return metadata

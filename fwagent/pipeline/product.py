@@ -26,7 +26,7 @@ from fwagent.reporting.final_report import ReportGenerator, ReportValidator, REP
 from fwagent.reporting.json_report import load_analysis_json, save_analysis_json
 from fwagent.runtime.ghidra import GhidraRuntime
 from fwagent.tools import analyze_binaries, discover_services, discover_web_surface, identify_architecture, inventory_filesystem, rank_binaries, scan_sensitive_files
-from fwagent.tools.common import sha256_file
+from fwagent.tools.common import is_windows_reparse_point, safe_exists, safe_is_dir, sha256_file
 from fwagent.tools.extractor import find_rootfs_candidates
 from fwagent.tools.ghidra_api import BinaryToolAPI
 
@@ -148,6 +148,11 @@ class RootfsArtifact:
     canonical: bool = True
     validated: bool = False
     validation_reason: str = ""
+    canonical_linux_rootfs: str | None = None
+    linux_semantics_preserved: bool = True
+    host_readable: bool = True
+    host_safe_view: str | None = None
+    semantic_fidelity: str = "canonical-linux-rootfs"
     created_at: str = field(default_factory=lambda: datetime.now(timezone.utc).replace(microsecond=0).isoformat())
 
     def to_dict(self) -> dict[str, Any]:
@@ -578,6 +583,12 @@ class AnalysisPipelineController:
         docker_result = self._docker_extract_rootfs(task_id, source, timeout=timeout)
         timings["docker_rootfs_fallback"] = round(time.monotonic() - docker_start, 3)
         if not docker_result.get("success"):
+            embedded_start = time.monotonic()
+            embedded_result = self._try_embedded_firmware_rootfs(task_id, source, attempts, timeout=timeout)
+            timings["embedded_firmware_fallback"] = round(time.monotonic() - embedded_start, 3)
+            if embedded_result.get("success"):
+                docker_result = embedded_result
+        if not docker_result.get("success"):
             code = str(docker_result.get("error_code") or "ROOTFS_NOT_FOUND")
             message = docker_result.get("error") or "no canonical rootfs discovered"
             attempts.append(
@@ -651,10 +662,11 @@ class AnalysisPipelineController:
             "-w",
             "/output",
             "--entrypoint",
-            "sh",
-            "fwagent-round2:latest",
-            "-lc",
-            f"binwalk -e --run-as=root /input/{source_abs.name}",
+            "binwalk",
+            self.round2_config.ghidra.docker_image,
+            "-e",
+            "--run-as=root",
+            f"/input/{source_abs.name}",
         ]
         try:
             completed = subprocess.run(command, text=True, capture_output=True, timeout=timeout)
@@ -668,6 +680,27 @@ class AnalysisPipelineController:
             return {"success": False, "error_code": _classify_docker_error(output), "error": output, "exit_code": completed.returncode, "candidates": [str(item) for item in candidates]}
         return {"success": True, "rootfs": str(selected["host_path"]), "validation": selected, "method": "docker-binwalk", "exit_code": completed.returncode, "candidates": [str(item) for item in candidates]}
 
+    def _try_embedded_firmware_rootfs(self, task_id: str, source: Path, attempts: list[dict[str, Any]], *, timeout: int) -> dict[str, Any]:
+        task_dir = self.workspace_root / task_id
+        last_result: dict[str, Any] = {"success": False, "error_code": "ROOTFS_NOT_FOUND", "error": "no embedded firmware candidate produced a rootfs"}
+        for embedded in _embedded_firmware_candidates(task_dir, source):
+            result = self._docker_extract_rootfs(task_id, embedded, timeout=timeout)
+            attempts.append(
+                {
+                    "method": "embedded-docker-binwalk",
+                    "embedded_firmware": str(embedded),
+                    "status": "success" if result.get("success") else "no_rootfs",
+                    "exit_code": result.get("exit_code"),
+                    "selected_rootfs": result.get("rootfs"),
+                    "selection_reason": (result.get("validation") or {}).get("validation_reason"),
+                    "error_code": result.get("error_code"),
+                }
+            )
+            if result.get("success"):
+                return {**result, "method": "embedded-docker-binwalk", "embedded_firmware": str(embedded)}
+            last_result = result
+        return last_result
+
     def _write_rootfs_artifact(
         self,
         task_id: str,
@@ -680,6 +713,8 @@ class AnalysisPipelineController:
         validation: dict[str, Any],
         architecture: str | None,
         endianness: str | None,
+        host_safe_view: Path | None = None,
+        linux_semantics_preserved: bool = True,
     ) -> RootfsArtifact:
         task_dir = self.workspace_root / task_id
         host_path = rootfs.resolve()
@@ -706,6 +741,11 @@ class AnalysisPipelineController:
             canonical=True,
             validated=bool(validation.get("valid")),
             validation_reason=str(validation.get("validation_reason") or validation.get("reason") or ""),
+            canonical_linux_rootfs=str(host_path),
+            linux_semantics_preserved=linux_semantics_preserved,
+            host_readable=True,
+            host_safe_view=str(host_safe_view.resolve()) if host_safe_view else None,
+            semantic_fidelity="canonical-linux-rootfs" if linux_semantics_preserved else "host-safe-view",
         )
         artifacts_dir = task_dir / "artifacts"
         artifacts_dir.mkdir(parents=True, exist_ok=True)
@@ -736,6 +776,7 @@ class AnalysisPipelineController:
         source_firmware: str | Path | None = None,
         source_firmware_hash: str | None = None,
         extraction_method: str = "imported-rootfs",
+        host_safe_view: str | Path | None = None,
     ) -> RootfsArtifact:
         task_dir = self.workspace_root / task_id
         task_dir.mkdir(parents=True, exist_ok=True)
@@ -755,6 +796,8 @@ class AnalysisPipelineController:
             validation=validation,
             architecture=None,
             endianness=None,
+            host_safe_view=Path(host_safe_view).resolve() if host_safe_view else None,
+            linux_semantics_preserved=host_safe_view is None,
         )
         report_path = task_dir / "reports" / "analysis.json"
         report = load_analysis_json(report_path) if report_path.exists() else {
@@ -777,6 +820,7 @@ class AnalysisPipelineController:
                 "rootfs": str(rootfs_path),
                 "canonical_rootfs": artifact.to_dict(),
                 "rootfs_candidates": [str(rootfs_path)],
+                "host_safe_view": str(Path(host_safe_view).resolve()) if host_safe_view else None,
             }
         )
         save_analysis_json(report, task_dir / "reports")
@@ -821,7 +865,7 @@ class AnalysisPipelineController:
             "confidence": architecture.get("confidence", 0.0),
             "architectures": architecture.get("architectures", {}),
             "samples": architecture.get("samples", []),
-            "os": "linux" if (rootfs / "etc").exists() else None,
+            "os": "linux" if safe_exists(rootfs / "etc", allow_symlink=True) else None,
         }
         report["extraction"]["rootfs"] = str(rootfs)
         report["extraction"]["canonical_rootfs"] = rootfs_artifact.to_dict()
@@ -850,6 +894,8 @@ class AnalysisPipelineController:
             validation={**validation, "file_count": filesystem.get("total_files", 0), "elf_count": filesystem.get("elf_files", 0)},
             architecture=architecture.get("primary_architecture"),
             endianness=architecture.get("endianness"),
+            host_safe_view=Path(rootfs_artifact.host_safe_view).resolve() if rootfs_artifact.host_safe_view else None,
+            linux_semantics_preserved=rootfs_artifact.linux_semantics_preserved,
         )
         report["extraction"]["canonical_rootfs"] = _load_json_if_exists(task_dir / "artifacts" / "rootfs.json")
         save_analysis_json(report, task_dir / "reports")
@@ -876,7 +922,7 @@ class AnalysisPipelineController:
         report = load_analysis_json(task_dir / "reports" / "analysis.json")
         rootfs = Path(report.get("extraction", {}).get("rootfs") or "")
         elf_files = report.get("filesystem", {}).get("categories", {}).get("elf", [])
-        if not report.get("extraction", {}).get("canonical_rootfs") or not rootfs.exists():
+        if not report.get("extraction", {}).get("canonical_rootfs") or not safe_exists(rootfs, allow_symlink=True):
             return {"success": False, "stage_status": "blocked", "blocking_reason": "canonical rootfs is unavailable", "targets": [], "items_processed": 0, "output_artifacts": ["ghidra/targets.json"]}
         if not elf_files:
             out = {"success": False, "stage_status": "skipped", "blocking_reason": "no ELF files discovered in canonical rootfs", "targets": [], "selected_static_targets": 0, "items_processed": 0, "output_artifacts": ["ghidra/targets.json"]}
@@ -902,7 +948,7 @@ class AnalysisPipelineController:
         targets = []
         for item in selected[:max_targets]:
             host = rootfs / item["path"].lstrip("/")
-            targets.append({**item, "host_path": str(host), "exists": host.exists()})
+            targets.append({**item, "host_path": str(host), "exists": safe_exists(host)})
         out = {
             "success": True,
             "targets": targets,
@@ -1400,21 +1446,16 @@ def validate_rootfs_candidate(candidate: str | Path) -> dict[str, Any]:
     if _looks_like_container_only_path(path):
         result["validation_reason"] = "candidate is a container path and was not mapped to a host path"
         return result
-    try:
-        exists = path.exists()
-    except OSError as exc:
-        result["validation_reason"] = f"path exists check failed: {exc}"
-        return result
-    if not exists:
+    if not safe_exists(path, allow_symlink=True):
         result["validation_reason"] = "path does not exist"
         return result
-    if not path.is_dir():
+    if not safe_is_dir(path, allow_symlink=True):
         result["validation_reason"] = "path is not a directory"
         return result
     markers = []
     for marker in ("bin", "etc", "usr", "sbin", "lib", "www", "htdocs"):
         try:
-            if (path / marker).is_dir():
+            if safe_is_dir(path / marker):
                 markers.append(marker)
         except OSError:
             continue
@@ -1490,7 +1531,7 @@ def normalize_extraction_path(value: str | Path, *, task_dir: Path) -> Path:
     raw = str(value)
     candidate = Path(raw)
     try:
-        if candidate.exists():
+        if safe_exists(candidate, allow_symlink=True):
             return candidate.resolve()
     except OSError:
         return candidate
@@ -1515,18 +1556,48 @@ def _safe_walk(root: Path):
         current_path = Path(current)
         kept = []
         for dirname in dirnames:
+            path = current_path / dirname
             try:
-                if not (current_path / dirname).is_symlink():
+                if not path.is_symlink() and not is_windows_reparse_point(path):
                     kept.append(dirname)
             except OSError:
                 continue
         dirnames[:] = kept
-        yield current, dirnames, filenames
+        kept_files = []
+        for filename in filenames:
+            path = current_path / filename
+            try:
+                if not path.is_symlink() and not is_windows_reparse_point(path):
+                    kept_files.append(filename)
+            except OSError:
+                continue
+        yield current, dirnames, kept_files
 
 
 def _looks_like_container_only_path(path: Path) -> bool:
     text = path.as_posix()
-    return text.startswith(("/repo/", "/workspace/", "/work/", "/output/")) and not path.exists()
+    return text.startswith(("/repo/", "/workspace/", "/work/", "/output/")) and not safe_exists(path, allow_symlink=True)
+
+
+def _embedded_firmware_candidates(task_dir: Path, original_source: Path) -> list[Path]:
+    extensions = {".bin", ".trx", ".img", ".chk", ".fw", ".upgrade"}
+    candidates: list[Path] = []
+    search_roots = [task_dir / "extracted", task_dir / "prepared_input"]
+    original = original_source.resolve()
+    for root in search_roots:
+        if not safe_exists(root, allow_symlink=True):
+            continue
+        for path in root.rglob("*"):
+            try:
+                if not path.is_file() or path.suffix.lower() not in extensions:
+                    continue
+                resolved = path.resolve()
+                if resolved == original or resolved.stat().st_size < 1024 * 1024:
+                    continue
+            except OSError:
+                continue
+            candidates.append(resolved)
+    return candidates[:5]
 
 
 def _host_to_container_path(host_path: Path, task_dir: Path) -> str | None:

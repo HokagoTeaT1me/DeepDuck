@@ -54,6 +54,7 @@ RUN apt-get update \
         libmagic1 \
         unar \
         zlib1g-dev \
+        liblzma-dev \
         liblzo2-dev \
         lzop \
         lziprecover \

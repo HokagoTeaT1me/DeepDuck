@@ -5,7 +5,7 @@ runtime:
   pids_limit: 512
 
 ghidra:
-  config_version: 0.1
+  config_version: 0.1-ghidra12-strings
   docker_image: fwagent-round2:latest
   home: /opt/ghidra
   project_dir: /workspace/ghidra_projects

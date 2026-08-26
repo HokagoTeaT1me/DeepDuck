@@ -37,7 +37,7 @@ class GhidraSettings:
     fallback_to_pipeline_arch: bool = True
     decompilation_mode: str = "on_demand"
     max_function_chars: int = 20000
-    config_version: str = "0.1"
+    config_version: str = "0.1-ghidra12-strings"
     docker_image: str = "fwagent-round2:latest"
 
 
@@ -92,7 +92,7 @@ def load_round2_config(path: str | Path | None = None) -> Round2Config:
         fallback_to_pipeline_arch=bool(ghidra_processor.get("fallback_to_pipeline_arch", True)),
         decompilation_mode=str(ghidra_decompilation.get("mode", "on_demand")),
         max_function_chars=int(ghidra_decompilation.get("max_function_chars", 20000)),
-        config_version=str(ghidra.get("config_version", "0.1")),
+        config_version=str(ghidra.get("config_version", "0.1-ghidra12-strings")),
         docker_image=str(os.environ.get("FWAGENT_GHIDRA_DOCKER_IMAGE", ghidra.get("docker_image", "fwagent-round2:latest"))),
     )
     return Round2Config(

@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from fwagent.tools.common import display_path, iter_files, normalize_token, safe_read_text
+from fwagent.tools.common import display_path, iter_files, normalize_token, safe_exists, safe_read_text
 
 
 KNOWN_SERVICES = {
@@ -88,11 +88,7 @@ def discover_web_surface(rootfs: str | Path) -> dict:
 
     for rel in WEB_ROOTS:
         candidate = root / rel
-        try:
-            exists = candidate.exists()
-        except OSError:
-            exists = False
-        if exists:
+        if safe_exists(candidate):
             roots.append(display_path(candidate, root))
 
     for path in iter_files(root):
@@ -159,8 +155,8 @@ def _candidate_service_files(root: Path) -> list[Path]:
         root / "etc" / "inittab",
         root / "etc" / "services",
     ]
-    candidates.extend(path for path in explicit if path.exists())
-    for path in iter_files(root / "etc" if (root / "etc").exists() else root):
+    candidates.extend(path for path in explicit if safe_exists(path))
+    for path in iter_files(root / "etc" if safe_exists(root / "etc") else root):
         if path.is_symlink():
             continue
         rel = path.absolute().relative_to(root).as_posix()

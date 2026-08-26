@@ -3,7 +3,7 @@ from __future__ import annotations
 import re
 from pathlib import Path
 
-from fwagent.tools.common import display_path, iter_files, safe_read_text
+from fwagent.tools.common import display_path, iter_files, safe_exists, safe_read_text
 
 
 PRIVATE_KEY_MARKERS = (
@@ -112,7 +112,7 @@ def _should_text_scan(path: Path) -> bool:
 def _scan_passwd_shadow(root: Path) -> list[dict]:
     findings: list[dict] = []
     passwd = root / "etc" / "passwd"
-    if passwd.exists():
+    if _safe_exists_regular(passwd):
         for line in safe_read_text(passwd).splitlines():
             if not line or line.startswith("#"):
                 continue
@@ -150,7 +150,7 @@ def _scan_passwd_shadow(root: Path) -> list[dict]:
                     }
                 )
     shadow = root / "etc" / "shadow"
-    if shadow.exists():
+    if _safe_exists_regular(shadow):
         for line in safe_read_text(shadow).splitlines():
             if not line or line.startswith("#"):
                 continue
@@ -166,6 +166,10 @@ def _scan_passwd_shadow(root: Path) -> list[dict]:
                     }
                 )
     return findings
+
+
+def _safe_exists_regular(path: Path) -> bool:
+    return safe_exists(path)
 
 
 def _dedupe_findings(findings: list[dict]) -> list[dict]:

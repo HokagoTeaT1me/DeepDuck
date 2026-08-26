@@ -3,7 +3,7 @@ from __future__ import annotations
 import os
 from pathlib import Path
 
-from fwagent.tools.common import display_path, is_elf, read_prefix
+from fwagent.tools.common import display_path, is_elf, is_windows_reparse_point, read_prefix
 
 
 SCRIPT_EXTENSIONS = {".sh", ".py", ".lua", ".php", ".pl", ".cgi", ".asp"}
@@ -43,46 +43,64 @@ def inventory_filesystem(rootfs: str | Path) -> dict:
 
     for current, dirnames, filenames in os.walk(root, followlinks=False):
         current_path = Path(current)
-        counts["directories"] += len(dirnames)
-        counts["symlinks"] += sum(1 for name in dirnames + filenames if (current_path / name).is_symlink())
+        kept_dirs = []
+        for dirname in dirnames:
+            path = current_path / dirname
+            try:
+                if path.is_symlink() or is_windows_reparse_point(path):
+                    counts["symlinks"] += 1
+                    continue
+                kept_dirs.append(dirname)
+            except OSError:
+                continue
+        dirnames[:] = kept_dirs
+        counts["directories"] += len(kept_dirs)
         for filename in filenames:
             path = current_path / filename
-            if path.is_symlink():
+            try:
+                if path.is_symlink() or is_windows_reparse_point(path):
+                    counts["symlinks"] += 1
+                    continue
+            except OSError:
                 continue
-            rel = display_path(path, root)
-            suffix = path.suffix.lower()
-            counts["total_files"] += 1
-
-            if is_elf(path):
-                counts["elf_files"] += 1
-                categories["elf"].append(rel)
-                if any(part in path.name for part in LIB_PATTERNS):
-                    counts["libraries"] += 1
-                    categories["libraries"].append(rel)
-                continue
-
-            prefix = read_prefix(path, 128)
-            shebang = prefix.startswith(b"#!")
-            if suffix in SCRIPT_EXTENSIONS or shebang:
-                counts["scripts"] += 1
-                _append_script_category(categories, rel, suffix, prefix)
-
-            if suffix in CONFIG_EXTENSIONS or _looks_like_config_path(path, root):
-                counts["config_files"] += 1
-                categories["config"].append(rel)
-
-            if suffix in WEB_EXTENSIONS or _looks_like_web_path(path, root):
-                counts["web_files"] += 1
-                _append_web_category(categories, rel, suffix)
-
-            if suffix in CERT_EXTENSIONS:
-                counts["certificates"] += 1
-                categories["certificates"].append(rel)
-                if suffix == ".key":
-                    counts["private_keys"] += 1
-                    categories["private_keys"].append(rel)
+            _inventory_regular_file(path, root, counts, categories)
 
     return {**counts, "categories": categories}
+
+
+def _inventory_regular_file(path: Path, root: Path, counts: dict[str, int], categories: dict[str, list[str]]) -> None:
+    rel = display_path(path, root)
+    suffix = path.suffix.lower()
+    counts["total_files"] += 1
+
+    if is_elf(path):
+        counts["elf_files"] += 1
+        categories["elf"].append(rel)
+        if any(part in path.name for part in LIB_PATTERNS):
+            counts["libraries"] += 1
+            categories["libraries"].append(rel)
+        return
+
+    prefix = read_prefix(path, 128)
+    shebang = prefix.startswith(b"#!")
+    if suffix in SCRIPT_EXTENSIONS or shebang:
+        counts["scripts"] += 1
+        _append_script_category(categories, rel, suffix, prefix)
+
+    if suffix in CONFIG_EXTENSIONS or _looks_like_config_path(path, root):
+        counts["config_files"] += 1
+        categories["config"].append(rel)
+
+    if suffix in WEB_EXTENSIONS or _looks_like_web_path(path, root):
+        counts["web_files"] += 1
+        _append_web_category(categories, rel, suffix)
+
+    if suffix in CERT_EXTENSIONS:
+        counts["certificates"] += 1
+        categories["certificates"].append(rel)
+        if suffix == ".key":
+            counts["private_keys"] += 1
+            categories["private_keys"].append(rel)
 
 
 def _append_script_category(categories: dict[str, list[str]], rel: str, suffix: str, prefix: bytes) -> None:

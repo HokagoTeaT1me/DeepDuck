@@ -35,6 +35,23 @@ class GhidraApiTests(unittest.TestCase):
             self.assertIn("fallback_reason", result["result"]["metadata"])
             self.assertIn("warnings", result)
 
+    def test_no_fallback_returns_structured_failure_metadata(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            binary = base / "sample"
+            write_fake_x86_elf(binary)
+            api = BinaryToolAPI(base / "workspace", config=Round2Config(ghidra=GhidraSettings(home=base / "missing-ghidra")))
+            api.runtime.check_environment = lambda: {"success": False, "errors": ["analyzeHeadless not found"], "warnings": []}
+            api.runtime.check_container_environment = lambda: {"success": False, "errors": ["docker permission denied"], "warnings": []}
+
+            result = api.analyze_binary(binary, force=True, allow_fallback=False)
+
+            self.assertFalse(result["success"])
+            metadata = result["result"]["metadata"]
+            self.assertEqual(metadata["backend_used"], "none")
+            self.assertFalse(metadata["fallback_used"])
+            self.assertEqual(metadata["fallback_reason"], "GHIDRA_CONTAINER_DOCKER_PERMISSION_DENIED")
+
 
 if __name__ == "__main__":
     unittest.main()

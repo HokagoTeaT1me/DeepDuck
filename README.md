@@ -28,7 +28,7 @@ Provider-backed investigation is a planning and decision layer. The provider see
 
 ## ✨ Key Features
 
-- Firmware extraction with Docker/binwalk-backed root filesystem recovery, including legacy LZMA SquashFS recovery via `sasquatch`.
+- Firmware extraction with Docker/binwalk-backed root filesystem recovery, archive-contained firmware fallback, and legacy LZMA SquashFS recovery via `sasquatch`.
 - Canonical RootFS validation, ELF inventory, architecture detection, and task workspace management.
 - Binary prioritization for high-value static targets.
 - Containerized Ghidra analysis with generated function/import/export artifacts.
@@ -275,7 +275,7 @@ Build the default containerized Ghidra/extraction worker:
 docker build -t fwagent-round2:latest .
 ```
 
-The container includes `binwalk`, `unblob`, `unsquashfs`, and `sasquatch` so legacy SquashFS 3.x/4.x LZMA firmware images can be recovered by the default Docker extraction path.
+The container includes `binwalk`, `unblob`, `unsquashfs`, and `sasquatch` so legacy SquashFS 3.x/4.x LZMA firmware images can be recovered by the default Docker extraction path. Archive wrappers such as vendor ZIP releases are unpacked first, then embedded firmware images are retried through the Docker extraction path when the wrapper itself has no Linux rootfs.
 
 `fwagent-round2:latest` and `fwagent-round3-dynamic:latest` are internal implementation image names retained for reproducibility metadata; DeepDuck is the product name.
 
@@ -293,6 +293,44 @@ DeepDuck/
   workspace/      # Generated task workspaces, ignored by Git
   reports/        # Local generated reports, ignored by Git
 ```
+
+## 🤝 Team & Support
+
+<p>
+  <img src="./assets/htt.png" height="30" style="vertical-align: middle;" alt="Hokago Tea Time Lab"/>
+  <strong style="margin-left: 8px;">Hokago Tea Time Lab</strong>
+  <img src="./assets/CTRA.png" height="30" style="vertical-align: middle; margin-left: 40px;" alt="Hokago Tea Time Lab"/>
+  <strong style="margin-left: 8px;">CTRA@DGSSZ</strong>
+</p>
+
+
+
+<table>
+  <tr>
+    <td align="center" width="90">
+      <a href="https://github.com/zer0ptr">
+        <img src="https://avatars.githubusercontent.com/u/196273893?v=4" width="70px;" style="border-radius: 50%;" alt=""/>
+      </a>
+      <br/>
+      <a href="mailto:iszhenghailin@gmail.com"><sub><b>Hailin Zheng</b></sub></a>
+    </td>
+    <td align="center" width="90">
+      <a href="https://github.com/colorfulbird3">
+        <img src="https://avatars.githubusercontent.com/u/221922291?v=4" width="70px;" style="border-radius: 50%;" alt=""/>
+      </a>
+      <br/>
+      <a href="mailto:a1396228851@outlook.com"><sub><b>Qingyi Huang</b></sub></a>
+    </td>
+        <td align="center" width="90">
+        <a href="https://github.com/Fa2maZ">
+        <img src="https://avatars.githubusercontent.com/u/284943533?v=4" width="70px;" style="border-radius: 50%;" alt=""/>
+      </a>
+      <br/>
+      <a href="mailto:"><sub><b>Guandong Li</b></sub></a>
+    </td>
+  </tr>
+</table>
+
 
 ## 📜 License
 

@@ -4,7 +4,9 @@ import tempfile
 import unittest
 from pathlib import Path
 
+from fwagent.tools.common import iter_files
 from fwagent.tools.filesystem import inventory_filesystem
+from fwagent.tools.secrets import scan_sensitive_files
 
 
 class FilesystemTests(unittest.TestCase):
@@ -43,6 +45,33 @@ class FilesystemTests(unittest.TestCase):
             self.assertEqual(result["elf_files"], 1)
             self.assertEqual(result["symlinks"], 1)
             self.assertIn("/bin/app", result["categories"]["elf"])
+
+    def test_iter_files_skips_windows_reparse_points(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "etc").mkdir()
+            keep = root / "etc" / "system.conf"
+            skip = root / "etc" / "badlink"
+            keep.write_text("x=y\n", encoding="utf-8")
+            skip.write_text("broken", encoding="utf-8")
+
+            with unittest.mock.patch("fwagent.tools.common.is_windows_reparse_point", side_effect=lambda path: Path(path).name == "badlink"):
+                files = list(iter_files(root))
+
+            self.assertEqual(files, [keep])
+
+    def test_passwd_reparse_does_not_abort_secret_scan(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "etc").mkdir()
+            passwd = root / "etc" / "passwd"
+            passwd.write_text("root:x:0:0:root:/root:/bin/sh\n", encoding="utf-8")
+
+            reparse = lambda path: Path(path).name == "passwd"
+            with unittest.mock.patch("fwagent.tools.common.is_windows_reparse_point", side_effect=reparse), unittest.mock.patch("fwagent.tools.secrets.safe_exists", side_effect=lambda path: Path(path).name != "passwd"):
+                findings = scan_sensitive_files(root)
+
+            self.assertEqual(findings, [])
 
 
 if __name__ == "__main__":

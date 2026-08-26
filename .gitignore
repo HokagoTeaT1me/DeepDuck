@@ -11,6 +11,7 @@ reports/*
 !reports/
 !reports/v0_1_final_acceptance.md
 !reports/v0_1_documentation_polish.md
+!reports/v0_1_multi_firmware_backend_hardening.md
 .env
 .env.local
 .env.production
