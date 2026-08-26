@@ -28,7 +28,7 @@ Provider-backed investigation is a planning and decision layer. The provider see
 
 ## ✨ Key Features
 
-- Firmware extraction with Docker/binwalk-backed root filesystem recovery.
+- Firmware extraction with Docker/binwalk-backed root filesystem recovery, including legacy LZMA SquashFS recovery via `sasquatch`.
 - Canonical RootFS validation, ELF inventory, architecture detection, and task workspace management.
 - Binary prioritization for high-value static targets.
 - Containerized Ghidra analysis with generated function/import/export artifacts.
@@ -229,23 +229,24 @@ Current status:
 | ARM real firmware | PASS |
 | MIPS architecture fixture | PASS |
 | Unsupported input handling | PASS |
-| Second distinct real firmware | PENDING |
+| Additional real firmware extraction/static reports | PARTIAL |
 | Multi-firmware real acceptance | PARTIAL |
 
-Release candidate compatibility validation remains pending for a second distinct authorized real firmware image. DeepDuck v0.1 is therefore not documented as RC-ready.
+Release candidate compatibility validation remains pending for full real Ghidra and runtime/provider acceptance across a second distinct authorized real firmware image. DeepDuck v0.1 is therefore not documented as RC-ready.
 
 ## 🧩 Validated Samples
 
 | Sample Class | Status | Notes |
 |---|---|---|
 | TP-Link SR20 real firmware | PASS | Real extraction, Ghidra, selected dynamic runtime, provider acceptance |
+| D-Link DIR-815 real firmware | PARTIAL | Legacy SquashFS/LZMA extraction via `sasquatch`, MIPS little-endian inventory and reports; real Ghidra/runtime validation partial |
+| Huawei HG532e real firmware | PARTIAL | Big-endian SquashFS/LZMA extraction via `sasquatch`, MIPS big-endian inventory and reports; real Ghidra/runtime validation partial |
 | MIPS architecture fixture | PASS | Fixture integration coverage only |
 | Opaque unsupported sample | PASS | Graceful partial handling, no crash |
-| Second distinct real firmware | PENDING | Required before full multi-firmware RC gate |
 
 ## ⚠️ Known Limitations
 
-1. Real multi-firmware acceptance currently includes only one distinct real firmware image.
+1. Full real dynamic/provider acceptance currently includes only one distinct real firmware image; additional real firmware images have extraction/static reports only.
 2. Dynamic validation has been demonstrated on the selected FastCGI path, not every firmware service.
 3. Runtime repair establishes reconstructed reachability, not original vendor boot-sequence parity.
 4. Source/sink correlation is evidence-oriented and does not imply vulnerability confirmation.
@@ -273,6 +274,8 @@ Build the default containerized Ghidra/extraction worker:
 ```bash
 docker build -t fwagent-round2:latest .
 ```
+
+The container includes `binwalk`, `unblob`, `unsquashfs`, and `sasquatch` so legacy SquashFS 3.x/4.x LZMA firmware images can be recovered by the default Docker extraction path.
 
 `fwagent-round2:latest` and `fwagent-round3-dynamic:latest` are internal implementation image names retained for reproducibility metadata; DeepDuck is the product name.
 

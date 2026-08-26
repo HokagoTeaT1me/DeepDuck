@@ -26,6 +26,7 @@ class FirmAERuntime:
             "qemu_system_mips": shutil.which("qemu-system-mips") is not None,
             "binwalk": shutil.which("binwalk") is not None,
             "unsquashfs": shutil.which("unsquashfs") is not None,
+            "sasquatch": shutil.which("sasquatch") is not None,
             "dev_net_tun": Path("/dev/net/tun").exists(),
         }
         warnings = []

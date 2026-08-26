@@ -6,6 +6,7 @@ import shutil
 import tarfile
 import zipfile
 from pathlib import Path
+from typing import Callable
 
 from fwagent.runtime.command import CommandRunner
 from fwagent.tools.common import is_within, iter_files, read_prefix
@@ -87,38 +88,50 @@ def _post_process_embedded_files(
     timeout: int,
     errors: list[dict],
 ) -> int:
-    if not shutil.which("unsquashfs"):
+    squashfs_extractors = _squashfs_extractors()
+    if not squashfs_extractors:
         return 0
 
     extracted = 0
     for path in list(iter_files(extract_dir)):
         if not _is_squashfs_image(path):
             continue
-        target = path.with_name(f"{path.name}_unsquashfs")
-        before = _count_files(target)
-        if before > 0:
-            continue
-        result = runner.run(["unsquashfs", "-f", "-d", str(target), str(path)], timeout=timeout, cwd=extract_dir)
-        after = _count_files(target)
-        if result.exit_code == 0 and after > before:
-            extracted += after - before
-            continue
-        if after > before:
-            extracted += after - before
-        errors.append(
-            {
-                "module": "extractor",
-                "tool": "unsquashfs",
-                "error": (result.stderr or result.stdout or "unsquashfs failed")[:2000],
-                "recoverable": True,
-            }
-        )
+        for name, command_builder in squashfs_extractors:
+            target = path.with_name(f"{path.name}_{name}")
+            before = _count_files(target)
+            if before > 0:
+                break
+            result = runner.run(command_builder(target, path), timeout=timeout, cwd=extract_dir)
+            after = _count_files(target)
+            if result.exit_code == 0 and after > before:
+                extracted += after - before
+                break
+            if after > before:
+                extracted += after - before
+                break
+            errors.append(
+                {
+                    "module": "extractor",
+                    "tool": name,
+                    "error": (result.stderr or result.stdout or f"{name} failed")[:2000],
+                    "recoverable": True,
+                }
+            )
     return extracted
+
+
+def _squashfs_extractors() -> list[tuple[str, Callable[[Path, Path], list[str]]]]:
+    extractors = []
+    if shutil.which("unsquashfs"):
+        extractors.append(("unsquashfs", lambda target, image: ["unsquashfs", "-f", "-d", str(target), str(image)]))
+    if shutil.which("sasquatch"):
+        extractors.append(("sasquatch", lambda target, image: ["sasquatch", "-f", "-d", str(target), str(image)]))
+    return extractors
 
 
 def _is_squashfs_image(path: Path) -> bool:
     prefix = read_prefix(path, 4)
-    return prefix in {b"hsqs", b"sqsh"}
+    return prefix in {b"hsqs", b"sqsh", b"qshs", b"shsq"}
 
 
 def _stdlib_extract(firmware_path: Path, extract_dir: Path) -> dict:

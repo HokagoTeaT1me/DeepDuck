@@ -6,6 +6,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
+from fwagent.models import CommandResult
 from fwagent.pipeline.product import (
     AnalysisPipelineController,
     PipelineStageResult,
@@ -17,6 +18,7 @@ from fwagent.pipeline.product import (
 )
 from fwagent.reporting.final_report import ReportGenerator
 from fwagent.tools.architecture import identify_architecture
+from fwagent.tools.extractor import _post_process_embedded_files
 
 
 REAL_TPLINK_ROOTFS = Path(
@@ -75,6 +77,33 @@ def stages() -> dict[str, PipelineStageResult]:
 
 
 class ExtractionRecoveryTests(unittest.TestCase):
+    def test_sasquatch_recovers_when_unsquashfs_fails(self) -> None:
+        class FakeRunner:
+            def __init__(self) -> None:
+                self.commands: list[list[str]] = []
+
+            def run(self, command, **_) -> CommandResult:
+                self.commands.append(command)
+                if command[0] == "sasquatch":
+                    target = Path(command[3])
+                    (target / "etc").mkdir(parents=True)
+                    (target / "etc" / "passwd").write_text("root:x:0:0:root:/root:/bin/sh\n", encoding="utf-8")
+                    return CommandResult(command=list(command), exit_code=0, stdout="ok", stderr="", duration=0.01)
+                return CommandResult(command=list(command), exit_code=1, stdout="", stderr="lzma failed", duration=0.01)
+
+        with tempfile.TemporaryDirectory() as tmp:
+            extract_dir = Path(tmp)
+            (extract_dir / "legacy.squashfs").write_bytes(b"qshs" + b"\x00" * 64)
+            errors: list[dict] = []
+            runner = FakeRunner()
+
+            with patch("fwagent.tools.extractor.shutil.which", return_value="/usr/bin/tool"):
+                extracted = _post_process_embedded_files(extract_dir, runner, 1, errors)
+
+            self.assertEqual(extracted, 1)
+            self.assertEqual([command[0] for command in runner.commands], ["unsquashfs", "sasquatch"])
+            self.assertEqual(errors[0]["tool"], "unsquashfs")
+
     def test_primary_no_rootfs_triggers_docker_fallback(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

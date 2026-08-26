@@ -30,8 +30,10 @@ RUN apt-get update \
         curl \
         file \
         findutils \
+        git \
         gzip \
         grep \
+        build-essential \
         openjdk-21-jdk-headless \
         p7zip-full \
         proot \
@@ -40,6 +42,7 @@ RUN apt-get update \
         squashfs-tools \
         tar \
         unzip \
+        wget \
         xxd \
         xz-utils \
         \
@@ -68,6 +71,22 @@ RUN apt-get update \
 
 RUN pip install --no-cache-dir \
         unblob
+
+# -----------------------------
+# Legacy firmware extractors
+# -----------------------------
+
+RUN set -eux; \
+    tmpdir="$(mktemp -d)"; \
+    git clone --depth 1 https://github.com/devttys0/sasquatch.git "${tmpdir}/sasquatch"; \
+    cd "${tmpdir}/sasquatch"; \
+    ./build.sh >/tmp/sasquatch-build.log 2>&1 || true; \
+    cd squashfs4.3/squashfs-tools; \
+    sed -i 's/ -Werror//g; s/-Werror//g' Makefile; \
+    make clean >/dev/null 2>&1 || true; \
+    make EXTRA_CFLAGS=-fcommon; \
+    install -m 0755 sasquatch /usr/local/bin/sasquatch; \
+    rm -rf "${tmpdir}" /tmp/sasquatch-build.log
 
 # -----------------------------
 # Install Ghidra
@@ -106,6 +125,9 @@ RUN set -eux; \
     unblob --help >/tmp/unblob-help.txt; \
     command -v binwalk; \
     binwalk --help >/tmp/binwalk-help.txt; \
+    command -v sasquatch; \
+    sasquatch -version >/tmp/sasquatch-version.txt 2>&1 || test -s /tmp/sasquatch-version.txt; \
+    cat /tmp/sasquatch-version.txt; \
     command -v readelf; \
     command -v objdump; \
     test -x "${GHIDRA_HOME}/support/analyzeHeadless"

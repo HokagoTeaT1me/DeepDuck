@@ -28,6 +28,7 @@ CHECKS = [
     DoctorCheck("unblob", ["unblob", "--help"]),
     DoctorCheck("binwalk", ["binwalk", "--help"]),
     DoctorCheck("unsquashfs", ["unsquashfs", "-version"], allow_nonzero_with_output=True),
+    DoctorCheck("sasquatch", ["sasquatch", "-version"], allow_nonzero_with_output=True),
     DoctorCheck("7z", ["7z", "i"]),
 ]
 
