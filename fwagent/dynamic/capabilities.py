@@ -18,6 +18,8 @@ class DynamicCapabilities:
     qemu_user_network: bool
     native_firmae: bool
     compatible_backend: bool
+    qemu_mipsel_user: bool = False
+    qemu_mips_user: bool = False
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -31,6 +33,8 @@ class DynamicCapabilities:
             "qemu_user_network": self.qemu_user_network,
             "native_firmae": self.native_firmae,
             "compatible_backend": self.compatible_backend,
+            "qemu_mipsel_user": self.qemu_mipsel_user,
+            "qemu_mips_user": self.qemu_mips_user,
         }
 
 
@@ -56,4 +60,6 @@ def detect_capabilities() -> DynamicCapabilities:
         qemu_user_network=qemu_user_network,
         native_firmae=native_firmae,
         compatible_backend=compatible_backend,
+        qemu_mipsel_user=shutil.which("qemu-mipsel-static") is not None,
+        qemu_mips_user=shutil.which("qemu-mips-static") is not None,
     )

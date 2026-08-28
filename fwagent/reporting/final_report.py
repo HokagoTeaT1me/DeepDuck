@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import Any
 
 from fwagent import __version__
+from fwagent.dynamic.models import is_canonical_runtime_evidence
 from fwagent.findings import FindingClaimGuard, FINDING_STATUSES
 
 
@@ -148,6 +149,7 @@ class ReportGenerator:
         priority = self._load("prioritization/scheduler_state.json") or {"assessments": self._load("prioritization/assessment.json") or []}
         hypotheses = self._load("dynamic/hypotheses.json") or []
         evidence = self._load("dynamic/evidence/evidence.json") or []
+        runtime_summary = self._load("dynamic/runtime_summary.json") or {}
         findings_payload = findings_payload or self._load("findings/findings.json") or {"findings": []}
         findings = findings_payload.get("findings") or []
         evidence_ids = [item.get("id") for item in evidence if item.get("id")]
@@ -178,7 +180,13 @@ class ReportGenerator:
             inconclusive_hypotheses=inconclusive,
             blocked_items=blocked,
             runtime_repairs=self._runtime_repairs(),
-            evidence_summary={"total": len(evidence), "dynamic": len([item for item in evidence if str(item.get("id", "")).startswith("DE-")]), "ids": evidence_ids},
+            evidence_summary={
+                "total": len(evidence),
+                "dynamic": len([item for item in evidence if str(item.get("id", "")).startswith("DE-")]),
+                "real_dynamic": sum(1 for item in evidence if is_canonical_runtime_evidence(item)),
+                "attempt_or_status": sum(1 for item in evidence if str(item.get("id", "")).startswith("DE-") and not is_canonical_runtime_evidence(item)),
+                "ids": evidence_ids,
+            },
             timeline=self._timeline(),
             remaining_problems=self._remaining_problems(findings, blocked),
             provider_status={"provider_backed": False, "planner": "deterministic", "real_model_validation": "deferred"},
@@ -188,7 +196,7 @@ class ReportGenerator:
             validation_gaps=(pipeline.get("validation_gaps") if isinstance(pipeline, dict) else []) or [],
             taint_summary=taint if isinstance(taint, dict) else {},
             priority_summary=priority if isinstance(priority, dict) else {},
-            validation={"investigation": investigation.get("summary") or {}, "provider_backed": False},
+            validation={"investigation": investigation.get("summary") or {}, "runtime": runtime_summary, "provider_backed": False},
             components=(graph_full.get("components") if isinstance(graph_full, dict) else []) or [],
             attack_surface=entries,
             hypotheses=hypotheses,
@@ -312,6 +320,12 @@ class ReportGenerator:
                 "",
                 "## 12. Dynamic Validation",
                 "",
+                f"- Dynamic feasibility: `{(model.validation.get('runtime') or {}).get('dynamic_feasibility', 'not_assessed')}`",
+                f"- Process started: `{(model.validation.get('runtime') or {}).get('process_started', False)}`",
+                f"- Service reachable: `{(model.validation.get('runtime') or {}).get('service_reachable', False)}`",
+                f"- Request sent: `{(model.validation.get('runtime') or {}).get('request_sent', False)}`",
+                f"- Response observed: `{(model.validation.get('runtime') or {}).get('response_observed', False)}`",
+                f"- Real DynamicEvidence: `{model.evidence_summary.get('real_dynamic', 0)}`",
                 f"- Blocked items: `{len(model.blocked_items)}`",
                 f"- Runtime repair artifacts: `{len(model.runtime_repairs)}`",
                 f"- Validation gaps: `{len(model.validation_gaps)}`",
@@ -623,7 +637,19 @@ code {{ background: #e2e8f0; padding: .1rem .25rem; border-radius: 4px; }}
     def _runtime_repairs(self) -> list[dict[str, Any]]:
         repairs = []
         for path in (self.task_dir / "dynamic").glob("**/*repair*.json") if (self.task_dir / "dynamic").exists() else []:
-            repairs.append({"path": path.relative_to(self.task_dir).as_posix(), "exists": True})
+            try:
+                payload = json.loads(path.read_text(encoding="utf-8"))
+            except (OSError, json.JSONDecodeError):
+                payload = {}
+            repairs.append({
+                "path": path.relative_to(self.task_dir).as_posix(),
+                "exists": True,
+                "repair_id": payload.get("repair_id") or payload.get("id"),
+                "repair_type": payload.get("repair_type") or payload.get("type"),
+                "source_rootfs_modified": bool(payload.get("source_rootfs_modified", False)),
+                "runtime_copy_modified": bool(payload.get("runtime_copy_modified", False)),
+                "fidelity_limitations": payload.get("fidelity_limitations") or [],
+            })
         return repairs
 
     def _timeline(self) -> list[dict[str, Any]]:

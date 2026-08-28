@@ -65,6 +65,19 @@ class DynamicValidationPlan:
     known_endpoint: str | None = None
     known_protocol: str | None = None
     out_of_scope: list[str] = field(default_factory=list)
+    backend_reason: str | None = None
+    architecture: str | None = None
+    endianness: str | None = None
+    emulator: str | None = None
+    loader: str | None = None
+    rootfs_source: str | None = None
+    rootfs_semantic_fidelity: str | None = None
+    container_image: str | None = None
+    network_isolation: str = "loopback/private-only"
+    service_binary: str | None = None
+    startup_method: str | None = None
+    repair_ids: list[str] = field(default_factory=list)
+    runtime_budget_seconds: int | None = None
 
     def __post_init__(self) -> None:
         if self.validation_strategy not in VALIDATION_STRATEGIES:

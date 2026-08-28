@@ -13,11 +13,13 @@ DYNAMIC_EVIDENCE_TYPES = {
     "validation_blocked",
     "validation_inconclusive",
     "process_running",
+    "process_started",
     "port_open",
     "port_closed",
     "service_reachable",
     "http_response",
     "runtime_error",
+    "runtime_log_observed",
     "process_crash",
     "service_exit",
     "log_observation",
@@ -67,6 +69,8 @@ DYNAMIC_EVIDENCE_TYPES = {
     "behavior_difference",
     "handler_reached",
     "application_response",
+    "request_received",
+    "protocol_response",
     "validation_supported",
     "validation_rejected",
     "validation_safety_stop",
@@ -90,6 +94,52 @@ DYNAMIC_EVIDENCE_TYPES = {
     "hypothesis_candidate_rejected",
     "finding_candidate_grouped",
 }
+
+CANONICAL_RUNTIME_OBSERVATION_TYPES = {
+    "process_running",
+    "process_started",
+    "port_open",
+    "service_reachable",
+    "http_response",
+    "service_start_success",
+    "service_process_alive",
+    "service_port_listening",
+    "service_http_response",
+    "backend_start_success",
+    "backend_socket_ready",
+    "fastcgi_socket_ready",
+    "fastcgi_backend_alive",
+    "fastcgi_request_sent",
+    "fastcgi_response_received",
+    "fastcgi_child_started",
+    "fastcgi_request_received",
+    "fastcgi_application_response",
+    "fastcgi_integration_reachable",
+    "runtime_ready",
+    "baseline_response",
+    "validation_request",
+    "handler_reached",
+    "application_response",
+    "request_received",
+    "protocol_response",
+    "listener_observed",
+    "entry_runtime_confirmed",
+    "handler_reachable",
+    "runtime_log_observed",
+    "behavior_difference",
+    "request_response_difference",
+}
+
+
+def is_canonical_runtime_evidence(item: "DynamicEvidence | dict[str, Any]") -> bool:
+    data = item.to_dict() if isinstance(item, DynamicEvidence) else item
+    return bool(
+        data.get("type") in CANONICAL_RUNTIME_OBSERVATION_TYPES
+        and data.get("execution_mode") == "real"
+        and data.get("runtime_observation_real") is True
+        and data.get("provenance") == "real_runtime_observation"
+        and not data.get("provider_backed")
+    )
 
 VALID_DYNAMIC_HYPOTHESIS_STATUSES = {
     "candidate",

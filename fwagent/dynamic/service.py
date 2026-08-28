@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import hashlib
 import re
 import shlex
 import shutil
@@ -29,6 +30,92 @@ SERVICE_EVIDENCE_TYPES = {
 
 SERVICE_STATES = {"not_started", "preparing", "starting", "running", "exited", "failed", "stopped"}
 
+RUNTIME_FAILURE_CATEGORIES = {
+    "runtime_backend_unavailable",
+    "emulator_unavailable",
+    "unsupported_architecture",
+    "loader_missing",
+    "shared_library_missing",
+    "config_missing",
+    "dependency_missing",
+    "device_node_missing",
+    "procfs_required",
+    "sysfs_required",
+    "vendor_nvram_required",
+    "ipc_dependency_missing",
+    "unix_socket_dependency_missing",
+    "permission_blocked",
+    "network_bind_failed",
+    "service_exited",
+    "protocol_unavailable",
+    "timeout",
+    "runtime_environment_incompatible",
+    "runtime_repair_insufficient",
+}
+
+
+@dataclass(frozen=True)
+class UserRuntimeMapping:
+    architecture: str
+    endianness: str
+    emulator: str
+    system_emulator: str
+
+    def to_dict(self) -> dict[str, Any]:
+        return asdict(self)
+
+
+@dataclass
+class ServiceRuntimeFeasibility:
+    service: str
+    binary: str
+    architecture: str
+    entry_point: str | None
+    protocol: str | None
+    runtime_candidate: str
+    required_files: list[str] = field(default_factory=list)
+    required_libraries: list[str] = field(default_factory=list)
+    required_environment: list[str] = field(default_factory=list)
+    required_dependencies: list[str] = field(default_factory=list)
+    runtime_feasible: bool = False
+    feasibility_score: float = 0.0
+    blocking_reasons: list[str] = field(default_factory=list)
+    estimated_cost: str = "bounded-medium"
+    selected_backend: str = "service-qemu"
+    selection_reason: str = "least-cost runtime capable of executing the selected firmware service"
+    endianness: str | None = None
+    emulator: str | None = None
+    loader: str | None = None
+    rootfs_source: str | None = None
+    rootfs_semantic_fidelity: str | None = None
+    failure_category: str | None = None
+
+    def __post_init__(self) -> None:
+        self.feasibility_score = round(max(0.0, min(1.0, float(self.feasibility_score))), 3)
+
+    def to_dict(self) -> dict[str, Any]:
+        return asdict(self)
+
+
+@dataclass
+class RuntimeAttemptStatus:
+    status: str
+    failure_category: str | None
+    short_reason: str
+    evidence_refs: list[str]
+    runtime_backend: str
+    process_started: bool = False
+    service_bound: bool = False
+    request_sent: bool = False
+    response_received: bool = False
+    observation_level: int = 1
+    failure_fingerprint: str | None = None
+    repeated_failure_count: int = 0
+    stop_reason: str | None = None
+
+    def to_dict(self) -> dict[str, Any]:
+        return asdict(self)
+
 
 @dataclass
 class ServiceLaunchProfile:
@@ -46,6 +133,11 @@ class ServiceLaunchProfile:
     config: dict[str, Any] = field(default_factory=dict)
     missing_information: list[str] = field(default_factory=list)
     nvram_dependencies: list[dict[str, str]] = field(default_factory=list)
+    architecture: str | None = None
+    endianness: str | None = None
+    entry_point: str | None = None
+    protocol: str | None = None
+    required_dependencies: list[str] = field(default_factory=list)
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -59,6 +151,14 @@ class RuntimeRepair:
     reason: str
     source_evidence: list[str] = field(default_factory=list)
     reversible: bool = True
+    original_environment_gap: str | None = None
+    files_modified: list[str] = field(default_factory=list)
+    source_rootfs_modified: bool = False
+    runtime_copy_modified: bool = True
+    transport_changes: list[str] = field(default_factory=list)
+    environment_changes: dict[str, str] = field(default_factory=dict)
+    original_startup_confirmed: bool = False
+    fidelity_limitations: list[str] = field(default_factory=list)
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -137,6 +237,9 @@ def reconstruct_service_startup(rootfs: str | Path, binary: str) -> ServiceLaunc
         }
     )
     nvram_dependencies = detect_nvram_dependencies(root, [startup_source, *config_files])
+    required_dependencies: list[str] = []
+    if startup_source == "/etc/inetd.conf":
+        required_dependencies.append("inetd socket activation with an accepted connection on standard input")
     return ServiceLaunchProfile(
         service=service,
         binary=binary_path,
@@ -152,6 +255,9 @@ def reconstruct_service_startup(rootfs: str | Path, binary: str) -> ServiceLaunc
         config=config,
         missing_information=missing_information,
         nvram_dependencies=nvram_dependencies,
+        entry_point=startup_source,
+        protocol="http" if service in {"httpd", "lighttpd", "uhttpd"} else None,
+        required_dependencies=required_dependencies,
     )
 
 
@@ -224,6 +330,204 @@ def check_runtime_dependencies(rootfs: str | Path, profile: ServiceLaunchProfile
     return result
 
 
+def resolve_user_runtime_mapping(architecture: str | None, endianness: str | None) -> UserRuntimeMapping | None:
+    arch = str(architecture or "").strip().lower().replace("_", "-")
+    endian = str(endianness or "").strip().lower()
+    if arch in {"arm", "arm32", "armel"}:
+        return UserRuntimeMapping("arm", "little", "qemu-arm-static", "qemu-system-arm")
+    if arch in {"mipsel", "mips32el", "mips-le"} or (arch in {"mips", "mips32"} and endian in {"little", "le", "little-endian"}):
+        return UserRuntimeMapping("mips", "little", "qemu-mipsel-static", "qemu-system-mipsel")
+    if arch in {"mipsbe", "mipseb", "mips32be", "mips-be"} or (arch in {"mips", "mips32"} and endian in {"big", "be", "big-endian"}):
+        return UserRuntimeMapping("mips", "big", "qemu-mips-static", "qemu-system-mips")
+    return None
+
+
+def resolve_runtime_rootfs(task_dir: str | Path, analysis: dict[str, Any] | None = None) -> dict[str, Any]:
+    """Resolve runtime RootFS without silently preferring a lossy host-safe view."""
+    task = Path(task_dir)
+    artifact_path = task / "artifacts" / "rootfs.json"
+    artifact: dict[str, Any] = {}
+    if artifact_path.exists():
+        try:
+            artifact = json.loads(artifact_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            artifact = {}
+    analysis = analysis or {}
+    canonical = (analysis.get("extraction") or {}).get("canonical_rootfs") or {}
+    if artifact:
+        canonical = {**canonical, **artifact}
+
+    candidates: list[tuple[str, Any, bool]] = [
+        ("canonical_linux_rootfs", canonical.get("canonical_linux_rootfs"), False),
+        ("workspace_relative_path", canonical.get("workspace_relative_path"), False),
+        ("path", canonical.get("path"), False),
+        ("host_path", canonical.get("host_path"), False),
+        ("host_safe_view", canonical.get("host_safe_view"), True),
+    ]
+    extraction_root = (analysis.get("extraction") or {}).get("rootfs")
+    if extraction_root:
+        candidates.append(("legacy_extraction_rootfs", extraction_root, False))
+    for source_field, raw, degraded in candidates:
+        if not raw:
+            continue
+        path = Path(str(raw))
+        if not path.is_absolute():
+            path = task / path
+        try:
+            exists = path.is_dir()
+        except OSError:
+            exists = False
+        if not exists:
+            continue
+        semantic_fidelity = str(canonical.get("semantic_fidelity") or "unknown")
+        linux_semantics_value = canonical.get("linux_semantics_preserved")
+        linux_semantics = bool(linux_semantics_value) if linux_semantics_value is not None else source_field != "host_safe_view"
+        degraded = degraded or source_field == "host_safe_view" or semantic_fidelity == "host-safe-view" or linux_semantics_value is False
+        return {
+            "success": True,
+            "path": str(path),
+            "source_field": source_field,
+            "canonical": bool(canonical.get("canonical", source_field != "legacy_extraction_rootfs")),
+            "linux_semantics_preserved": linux_semantics,
+            "semantic_fidelity": semantic_fidelity,
+            "degraded_provenance": degraded,
+            "blocking_reason": None,
+        }
+    return {
+        "success": False,
+        "path": None,
+        "source_field": None,
+        "canonical": False,
+        "linux_semantics_preserved": False,
+        "semantic_fidelity": "unavailable",
+        "degraded_provenance": False,
+        "blocking_reason": "canonical runtime rootfs is unavailable",
+    }
+
+
+def normalize_runtime_failure_category(diagnosis: str | None) -> str:
+    mapping = {
+        "qemu_user_failure": "runtime_backend_unavailable",
+        "missing_config": "config_missing",
+        "missing_file": "dependency_missing",
+        "missing_library": "shared_library_missing",
+        "permission_error": "permission_blocked",
+        "invalid_argument": "runtime_environment_incompatible",
+        "missing_device": "device_node_missing",
+        "missing_nvram": "vendor_nvram_required",
+        "port_in_use": "network_bind_failed",
+        "bind_failure": "network_bind_failed",
+        "fastcgi_backend_failure": "ipc_dependency_missing",
+        "unsupported_syscall": "runtime_environment_incompatible",
+        "daemon_exit": "service_exited",
+        "unknown_runtime_failure": "runtime_environment_incompatible",
+    }
+    category = mapping.get(str(diagnosis or ""), str(diagnosis or "runtime_environment_incompatible"))
+    return category if category in RUNTIME_FAILURE_CATEGORIES else "runtime_environment_incompatible"
+
+
+def classify_runtime_trace(stderr: str, exit_code: int | None) -> tuple[str | None, str | None]:
+    """Classify the deepest dependency reached by a bounded qemu-user syscall trace."""
+    trace = str(stderr or "")
+    lowered = trace.lower()
+    unix_socket_created = "socket(pf_unix" in lowered or "socket(af_unix" in lowered
+    missing_connect = bool(
+        re.search(r"connect\([^\n]*\)\s*=\s*-1\s+errno=2\b", trace, flags=re.IGNORECASE)
+    )
+    if unix_socket_created and missing_connect:
+        return (
+            "unix_socket_dependency_missing",
+            "ELF loader and shared libraries resolved, then the service created a Unix-domain socket and its connect call failed with ENOENT; the required vendor IPC endpoint was absent.",
+        )
+    if "can't load library" in lowered or "error while loading shared libraries" in lowered:
+        return "shared_library_missing", "qemu-user reached the firmware loader but a required shared library could not be loaded."
+    if "could not open" in lowered and exit_code in {126, 127}:
+        return "loader_missing", "qemu-user could not open the firmware executable or its requested loader."
+    return None, None
+
+
+def runtime_failure_fingerprint(
+    failure_category: str | None,
+    short_reason: str,
+    *,
+    backend: str,
+    binary: str,
+) -> str:
+    normalized = " ".join(str(short_reason or "").lower().split())[:500]
+    material = f"{failure_category or 'none'}|{backend}|{binary}|{normalized}"
+    return hashlib.sha256(material.encode("utf-8")).hexdigest()[:16]
+
+
+def repeated_failure_stop_reason(attempts: list[dict[str, Any]], *, max_repeats: int = 2) -> str | None:
+    fingerprints = [str(item.get("failure_fingerprint") or "") for item in attempts if item.get("failure_fingerprint")]
+    if len(fingerprints) < max(2, max_repeats):
+        return None
+    tail = fingerprints[-max_repeats:]
+    return "same_failure_fingerprint_repeated" if len(set(tail)) == 1 else None
+
+
+def assess_service_runtime_feasibility(
+    rootfs: str | Path,
+    profile: ServiceLaunchProfile,
+    *,
+    architecture: str | None,
+    endianness: str | None,
+    runner: Any = None,
+    rootfs_provenance: dict[str, Any] | None = None,
+    entry_point: str | None = None,
+    protocol: str | None = None,
+) -> ServiceRuntimeFeasibility:
+    mapping = resolve_user_runtime_mapping(architecture, endianness)
+    dependencies = check_runtime_dependencies(rootfs, profile, runner)
+    blocking: list[str] = []
+    failure_category = None
+    if mapping is None:
+        blocking.append(f"unsupported architecture/endian mapping: {architecture}/{endianness}")
+        failure_category = "unsupported_architecture"
+    elif shutil.which(mapping.emulator) is None:
+        blocking.append(f"required emulator is unavailable: {mapping.emulator}")
+        failure_category = "emulator_unavailable"
+    if dependencies.get("interpreter") and dependencies.get("interpreter") in dependencies.get("missing_paths", []):
+        blocking.append(f"ELF loader is missing: {dependencies['interpreter']}")
+        failure_category = failure_category or "loader_missing"
+    if dependencies.get("missing_libraries"):
+        blocking.append("shared libraries are missing: " + ", ".join(dependencies["missing_libraries"]))
+        failure_category = failure_category or "shared_library_missing"
+    missing_non_loader = [item for item in dependencies.get("missing_paths", []) if item != dependencies.get("interpreter")]
+    if missing_non_loader:
+        blocking.append("required files are missing: " + ", ".join(missing_non_loader))
+        failure_category = failure_category or ("config_missing" if any("conf" in item.lower() for item in missing_non_loader) else "dependency_missing")
+    provenance = rootfs_provenance or {}
+    if provenance.get("degraded_provenance"):
+        blocking.append("only a degraded host-safe RootFS view is available for runtime")
+        failure_category = failure_category or "runtime_environment_incompatible"
+    feasible = not blocking
+    base_score = 0.88 if feasible else max(0.05, 0.62 - (0.14 * len(blocking)))
+    return ServiceRuntimeFeasibility(
+        service=profile.service or Path(profile.binary).name,
+        binary=profile.binary,
+        architecture=mapping.architecture if mapping else str(architecture or "unknown"),
+        endianness=mapping.endianness if mapping else str(endianness or "unknown"),
+        entry_point=entry_point,
+        protocol=protocol,
+        runtime_candidate="service-level user-mode emulation",
+        required_files=list(profile.required_paths),
+        required_libraries=list(dependencies.get("needed_libraries") or []),
+        required_environment=sorted(profile.environment),
+        required_dependencies=sorted({*profile.required_dependencies, *[item for item in profile.missing_information if item]}),
+        runtime_feasible=feasible,
+        feasibility_score=base_score,
+        blocking_reasons=blocking,
+        selected_backend="service-qemu",
+        selection_reason="service-level emulation is lower cost than whole-system boot and preserves the firmware binary, loader, and libraries",
+        emulator=mapping.emulator if mapping else None,
+        loader=dependencies.get("interpreter"),
+        rootfs_source=provenance.get("source_field"),
+        rootfs_semantic_fidelity=provenance.get("semantic_fidelity"),
+        failure_category=failure_category,
+    )
+
+
 def prepare_service_rootfs(
     source_rootfs: str | Path,
     service_rootfs: str | Path,
@@ -231,10 +535,37 @@ def prepare_service_rootfs(
 ) -> dict[str, Any]:
     source = Path(source_rootfs)
     target = Path(service_rootfs)
-    reused = target.exists()
+    marker = target / ".deepduck-runtime-copy.json"
+    if target.exists() and not marker.exists():
+        shutil.rmtree(target, ignore_errors=True)
+    reused = target.exists() and marker.exists()
     if not reused:
-        shutil.copytree(source, target, symlinks=True, ignore_dangling_symlinks=True)
+        shutil.copytree(
+            source,
+            target,
+            symlinks=True,
+            ignore_dangling_symlinks=True,
+            ignore=lambda current, names: {name for name in names if Path(current) == source and name in {"dev", "proc", "sys"}},
+        )
     repairs: list[RuntimeRepair] = []
+    for pseudo_path in ("/dev", "/proc", "/sys"):
+        candidate = _root_path(target, pseudo_path)
+        if not candidate.exists():
+            candidate.mkdir(parents=True, exist_ok=True)
+        repairs.append(
+            RuntimeRepair(
+                id=f"RR-{len(repairs) + 1:04d}",
+                type="create_pseudo_filesystem_mountpoint",
+                target=pseudo_path,
+                reason="avoid copying firmware device and pseudo-filesystem entries into the temporary user-mode runtime",
+                original_environment_gap=f"{pseudo_path} requires runtime-specific mounts or controlled bindings",
+                files_modified=[pseudo_path],
+                source_rootfs_modified=False,
+                runtime_copy_modified=True,
+                original_startup_confirmed=False,
+                fidelity_limitations=[f"stock {pseudo_path} contents are not reproduced; dependent services must block or use explicit safe bindings"],
+            )
+        )
     for index, path in enumerate(profile.writable_paths, start=1):
         candidate = _root_path(target, path)
         if not _path_is_real_directory(candidate):
@@ -246,8 +577,18 @@ def prepare_service_rootfs(
                     target=path,
                     reason="required writable runtime path for service startup",
                     source_evidence=profile.config_files or ([profile.startup_source] if profile.startup_source else []),
+                    original_environment_gap=f"writable directory absent or not materialized in runtime copy: {path}",
+                    files_modified=[path],
+                    source_rootfs_modified=False,
+                    runtime_copy_modified=True,
+                    original_startup_confirmed=False,
+                    fidelity_limitations=["directory lifecycle is reconstructed outside vendor init"],
                 )
             )
+    marker.write_text(
+        json.dumps({"source_rootfs": str(source), "source_rootfs_modified": False, "complete": True}, indent=2, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
     return {
         "success": True,
         "service_rootfs": str(target),
@@ -458,27 +799,44 @@ def _resolve_binary(rootfs: Path, binary: str) -> str:
 
 def _find_startup_command(rootfs: Path, service: str, binary_path: str) -> tuple[str | None, list[str]]:
     init_dir = rootfs / "etc" / "init.d"
-    if not init_dir.exists():
-        return None, []
-    for path in sorted(init_dir.iterdir()):
-        if not path.is_file():
-            continue
-        text = path.read_text(encoding="utf-8", errors="ignore")
-        if service not in text and binary_path not in text:
-            continue
-        for line in text.splitlines():
-            if binary_path not in line and service not in line:
+    if init_dir.exists():
+        for path in sorted(init_dir.iterdir()):
+            if not path.is_file():
                 continue
-            if "service_start" not in line and binary_path not in line:
+            text = path.read_text(encoding="utf-8", errors="ignore")
+            if service not in text and binary_path not in text:
+                continue
+            for line in text.splitlines():
+                if binary_path not in line and service not in line:
+                    continue
+                if "service_start" not in line and binary_path not in line:
+                    continue
+                try:
+                    parts = shlex.split(line.strip(), comments=True, posix=True)
+                except ValueError:
+                    continue
+                if "service_start" in parts:
+                    parts = parts[parts.index("service_start") + 1 :]
+                if parts and (parts[0] == binary_path or Path(parts[0]).name == service):
+                    return f"/etc/init.d/{path.name}", parts[1:]
+    inetd = rootfs / "etc" / "inetd.conf"
+    if inetd.exists():
+        for line in inetd.read_text(encoding="utf-8", errors="ignore").splitlines():
+            if not line.strip() or line.lstrip().startswith("#"):
                 continue
             try:
-                parts = shlex.split(line.strip(), comments=True, posix=True)
+                parts = shlex.split(line, comments=True, posix=True)
             except ValueError:
                 continue
-            if "service_start" in parts:
-                parts = parts[parts.index("service_start") + 1 :]
-            if parts and (parts[0] == binary_path or Path(parts[0]).name == service):
-                return f"/etc/init.d/{path.name}", parts[1:]
+            if len(parts) < 7:
+                continue
+            server = parts[6]
+            if server != binary_path and Path(server).name != service:
+                continue
+            arguments = parts[7:]
+            if arguments and Path(arguments[0]).name == service:
+                arguments = arguments[1:]
+            return "/etc/inetd.conf", arguments
     return None, []
 
 

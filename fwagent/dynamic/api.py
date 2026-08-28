@@ -13,6 +13,7 @@ from fwagent.dynamic.backend import EmulationBackend, create_backend
 from fwagent.dynamic.config import DynamicConfig, load_dynamic_config
 from fwagent.dynamic.correlation import ComponentGraphBuilder, ComponentGraph
 from fwagent.dynamic.models import (
+    CANONICAL_RUNTIME_OBSERVATION_TYPES,
     DYNAMIC_EVIDENCE_TYPES,
     VALID_DYNAMIC_HYPOTHESIS_STATUSES,
     DynamicEvidence,
@@ -988,7 +989,26 @@ class DynamicToolAPI:
         if not hasattr(self.backend, "probe_service_http"):
             return {"success": False, "tool": "dynamic.probe_service_http", "errors": ["backend does not support service HTTP probing"]}
         service = str(args["service"])
-        result = self.backend.probe_service_http(service)
+        safe_input = SafeValidationInput(
+            input_id=f"SAFE-SERVICE-{service}",
+            protocol="http",
+            method="GET",
+            path="/",
+            category="baseline",
+            source="dynamic.probe_service_http",
+        )
+        errors = validate_safe_input(
+            safe_input,
+            max_request_bytes=self.config.validation.max_request_bytes,
+            max_body_bytes=self.config.validation.max_body_bytes,
+        )
+        if errors:
+            return {"success": False, "tool": "dynamic.probe_service_http", "errors": errors}
+        try:
+            result = self.backend.probe_service_http(service, safe_input.to_dict())
+        except TypeError:
+            result = self.backend.probe_service_http(service)
+        result["safe_validation_input"] = safe_input.to_dict()
         if result.get("success"):
             self._auto_evidence("service_http_response", f"Firmware service {service} returned an HTTP response", "service_http_probe", result, target=service)
             self._auto_evidence("service_reachable", f"Firmware service {service} is reachable over HTTP", "service_http_probe", result, target=service)
@@ -1829,10 +1849,16 @@ class DynamicToolAPI:
         }
         return self._create_evidence(payload)
 
-    def _create_evidence(self, args: dict[str, Any]) -> dict[str, Any]:
+    def _create_evidence(
+        self,
+        args: dict[str, Any],
+        *,
+        canonical_runtime_observation: bool = False,
+    ) -> dict[str, Any]:
         evidence_type = str(args["type"])
         if evidence_type not in DYNAMIC_EVIDENCE_TYPES:
             return {"success": False, "tool": "dynamic.create_evidence", "errors": [f"invalid evidence type: {evidence_type}"]}
+        canonical = canonical_runtime_observation and evidence_type in CANONICAL_RUNTIME_OBSERVATION_TYPES
         evidence = DynamicEvidence(
             id=f"DE-{len(self.evidence) + 1:04d}",
             type=evidence_type,
@@ -1841,6 +1867,8 @@ class DynamicToolAPI:
             source_tool=str(args.get("source_tool") or "dynamic_api"),
             confidence=_clamp(args.get("confidence"), 0.8),
             metadata=args.get("metadata") or {},
+            provenance="real_runtime_observation" if canonical else "runtime_status_record",
+            runtime_observation_real=canonical,
         )
         self.evidence.append(evidence)
         self.workspace.save_evidence(self.evidence)
@@ -2030,7 +2058,8 @@ class DynamicToolAPI:
                     "confidence": confidence,
                     "target": plan.hypothesis_id,
                     "metadata": {"validation_id": plan.validation_id, "hypothesis_id": plan.hypothesis_id, **metadata},
-                }
+                },
+                canonical_runtime_observation=not blocked,
             )
             evidence_id = created.get("result", {}).get("id")
             if evidence_id:
@@ -2178,34 +2207,9 @@ def _is_real_runtime_observation(evidence_type: str, result: dict[str, Any]) -> 
         return False
     if result.get("runtime_environment_blocked") or result.get("diagnosis") == "RUNTIME_ENVIRONMENT_BLOCKED":
         return False
-    return evidence_type in {
-        "process_running",
-        "port_open",
-        "service_reachable",
-        "http_response",
-        "service_start_success",
-        "service_process_alive",
-        "service_port_listening",
-        "service_http_response",
-        "backend_start_success",
-        "backend_socket_ready",
-        "fastcgi_socket_ready",
-        "fastcgi_backend_alive",
-        "fastcgi_request_sent",
-        "fastcgi_response_received",
-        "fastcgi_child_started",
-        "fastcgi_request_received",
-        "fastcgi_application_response",
-        "fastcgi_integration_reachable",
-        "runtime_ready",
-        "baseline_response",
-        "validation_request",
-        "handler_reached",
-        "application_response",
-        "listener_observed",
-        "entry_runtime_confirmed",
-        "handler_reachable",
-    }
+    if result.get("success") is False:
+        return False
+    return evidence_type in CANONICAL_RUNTIME_OBSERVATION_TYPES
 
 
 def _application_backend_arg(args: dict[str, Any]) -> str:

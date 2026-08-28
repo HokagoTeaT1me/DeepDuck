@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import signal
 import shutil
 import socket
@@ -38,14 +39,22 @@ from fwagent.dynamic.models import EmulationState
 from fwagent.dynamic.network import EmulationNetworkBackend, UserModeNetworkBackend
 from fwagent.dynamic.service import (
     RuntimeRepair,
+    RuntimeAttemptStatus,
     ServiceLaunchProfile,
     ServiceRuntimeState,
+    assess_service_runtime_feasibility,
     check_runtime_dependencies,
     classify_service_failure,
+    classify_runtime_trace,
+    normalize_runtime_failure_category,
     parse_boot_progress,
     prepare_service_rootfs,
     probe_http,
     reconstruct_service_startup,
+    repeated_failure_stop_reason,
+    resolve_runtime_rootfs,
+    resolve_user_runtime_mapping,
+    runtime_failure_fingerprint,
     save_json,
     wait_for_port,
 )
@@ -312,10 +321,22 @@ class QemuUserServiceBackend(EmulationBackend):
 
     def prepare(self, firmware_path: str | Path) -> dict[str, Any]:
         report = self.workspace.load_report()
-        rootfs = report.get("extraction", {}).get("rootfs")
-        if not rootfs or not Path(rootfs).is_dir():
-            return {"success": False, "errors": ["rootfs not available"]}
-        return {"success": True, "rootfs": rootfs}
+        resolution = resolve_runtime_rootfs(self.workspace.task_dir, report)
+        if not resolution.get("success"):
+            return {
+                "success": False,
+                "errors": [resolution.get("blocking_reason") or "rootfs not available"],
+                "failure_category": "runtime_environment_incompatible",
+                "rootfs_provenance": resolution,
+            }
+        if resolution.get("degraded_provenance"):
+            return {
+                "success": False,
+                "errors": ["host-safe RootFS view is not authoritative for runtime execution"],
+                "failure_category": "runtime_environment_incompatible",
+                "rootfs_provenance": resolution,
+            }
+        return {"success": True, "rootfs": resolution["path"], "rootfs_provenance": resolution}
 
     def boot(self, firmware_path: str | Path, *, timeout: int = 120) -> dict[str, Any]:
         prepared = self.prepare(firmware_path)
@@ -332,8 +353,16 @@ class QemuUserServiceBackend(EmulationBackend):
                 "diagnosis": "service_start_failure",
             }
         service_args = ["uname", "-m"] if executable == busybox else ["-c", "echo qemu-user-service-ok"]
+        mapping = self._runtime_mapping()
+        if mapping is None:
+            return {
+                "success": False,
+                "errors": ["runtime architecture/endian mapping is unsupported"],
+                "diagnosis": "unsupported_architecture",
+                "failure_category": "unsupported_architecture",
+            }
         command = [
-            "qemu-arm-static",
+            mapping.emulator,
             "-L",
             str(rootfs),
             str(executable),
@@ -345,6 +374,12 @@ class QemuUserServiceBackend(EmulationBackend):
             "success": result.exit_code == 0,
             "backend": self.name,
             "diagnosis": "service_start_failure" if result.exit_code != 0 else "service_running",
+            "failure_category": None if result.exit_code == 0 else normalize_runtime_failure_category(
+                classify_service_failure(result.stdout or "", result.stderr or "", result.exit_code, result.timed_out)
+            ),
+            "architecture": mapping.architecture,
+            "endianness": mapping.endianness,
+            "emulator": mapping.emulator,
             "exit_code": result.exit_code,
             "output": output,
         }
@@ -354,20 +389,181 @@ class QemuUserServiceBackend(EmulationBackend):
         if rootfs is None:
             return {"success": False, "errors": ["rootfs not available"]}
         profile = reconstruct_service_startup(rootfs, binary)
+        mapping = self._runtime_mapping()
+        if mapping:
+            profile.architecture = mapping.architecture
+            profile.endianness = mapping.endianness
         service_dir = self._service_dir(profile.service or Path(profile.binary).name)
         save_json(service_dir / "launch_profile.json", profile.to_dict())
         return {"success": True, "profile": profile.to_dict()}
+
+    def inspect_runtime_feasibility(self, service: str) -> dict[str, Any]:
+        report = self.workspace.load_report()
+        resolution = resolve_runtime_rootfs(self.workspace.task_dir, report)
+        if not resolution.get("success"):
+            return {
+                "success": False,
+                "service": service,
+                "runtime_feasible": False,
+                "failure_category": "runtime_environment_incompatible",
+                "blocking_reasons": [resolution.get("blocking_reason") or "canonical runtime rootfs is unavailable"],
+                "rootfs_provenance": resolution,
+            }
+        rootfs = Path(resolution["path"])
+        profile = self._load_or_reconstruct_profile(service)
+        platform = report.get("platform") or {}
+        rootfs_artifact = self._rootfs_artifact()
+        architecture = rootfs_artifact.get("architecture") or platform.get("architecture")
+        endianness = rootfs_artifact.get("endianness") or platform.get("endianness")
+        assessment = assess_service_runtime_feasibility(
+            rootfs,
+            profile,
+            architecture=architecture,
+            endianness=endianness,
+            runner=self.runner,
+            rootfs_provenance=resolution,
+            entry_point=profile.entry_point or profile.startup_source,
+            protocol=profile.protocol,
+        )
+        if profile.required_dependencies:
+            assessment.blocking_reasons.extend(profile.required_dependencies)
+            assessment.runtime_feasible = False
+            assessment.feasibility_score = min(assessment.feasibility_score, 0.45)
+            assessment.failure_category = assessment.failure_category or "ipc_dependency_missing"
+            assessment.selection_reason = "service-qemu selected for binary loading; full service validation is blocked by its supervised startup dependency"
+        payload = assessment.to_dict()
+        payload["rootfs_provenance"] = resolution
+        save_json(self._service_dir(service) / "feasibility.json", payload)
+        return {"success": True, "assessment": payload}
+
+    def smoke_test_executable(self, binary: str, *, timeout_seconds: int = 10) -> dict[str, Any]:
+        report = self.workspace.load_report()
+        resolution = resolve_runtime_rootfs(self.workspace.task_dir, report)
+        mapping = self._runtime_mapping()
+        if not resolution.get("success"):
+            return self._blocked_attempt("runtime_environment_incompatible", resolution.get("blocking_reason") or "rootfs unavailable", binary)
+        if mapping is None:
+            return self._blocked_attempt("unsupported_architecture", "runtime architecture/endian mapping is unsupported", binary)
+        emulator = shutil.which(mapping.emulator)
+        if not emulator:
+            return self._blocked_attempt("emulator_unavailable", f"required emulator is unavailable: {mapping.emulator}", binary)
+        rootfs = Path(resolution["path"])
+        executable = rootfs / binary.lstrip("/")
+        if not executable.exists():
+            return self._blocked_attempt("dependency_missing", f"smoke executable is absent: {binary}", binary)
+        command = [emulator, "-L", str(rootfs), str(executable)]
+        result = self.runner.run(command, timeout=max(1, min(30, int(timeout_seconds))))
+        output = (result.stdout or result.stderr or "")[:4000]
+        diagnosis = classify_service_failure(result.stdout or "", result.stderr or "", result.exit_code, result.timed_out)
+        failed_before_start = result.timed_out is False and any(
+            marker in output.lower() for marker in ("could not open", "no such file", "can't load library", "error while loading shared libraries")
+        )
+        process_started = not failed_before_start and result.exit_code not in {126, 127}
+        failure_category = None if process_started else normalize_runtime_failure_category(diagnosis)
+        status = RuntimeAttemptStatus(
+            status="observed" if process_started else "blocked",
+            failure_category=failure_category,
+            short_reason="firmware executable loaded under the mapped user-mode emulator" if process_started else (output or diagnosis)[:500],
+            evidence_refs=[],
+            runtime_backend=self.name,
+            process_started=process_started,
+            observation_level=2 if process_started else 1,
+        )
+        payload = {
+            "success": process_started,
+            "binary": binary,
+            "architecture": mapping.architecture,
+            "endianness": mapping.endianness,
+            "emulator": mapping.emulator,
+            "loader_root": str(rootfs),
+            "rootfs_provenance": resolution,
+            "command": command,
+            "exit_code": result.exit_code,
+            "timed_out": result.timed_out,
+            "output": output,
+            "attempt": status.to_dict(),
+        }
+        save_json(self.workspace.dynamic_dir / "runtime-smoke" / f"{Path(binary).name}.json", payload)
+        return payload
+
+    def trace_service_startup(self, service: str, *, timeout_seconds: int = 10) -> dict[str, Any]:
+        """Run one bounded, non-networked syscall trace against the canonical RootFS."""
+        report = self.workspace.load_report()
+        resolution = resolve_runtime_rootfs(self.workspace.task_dir, report)
+        mapping = self._runtime_mapping()
+        profile = self._load_or_reconstruct_profile(service)
+        if not resolution.get("success"):
+            return self._blocked_attempt(
+                "runtime_environment_incompatible",
+                resolution.get("blocking_reason") or "rootfs unavailable",
+                profile.binary,
+            )
+        if mapping is None:
+            return self._blocked_attempt(
+                "unsupported_architecture",
+                "runtime architecture/endian mapping is unsupported",
+                profile.binary,
+            )
+        emulator = shutil.which(mapping.emulator)
+        if not emulator:
+            return self._blocked_attempt(
+                "emulator_unavailable",
+                f"required emulator is unavailable: {mapping.emulator}",
+                profile.binary,
+            )
+        rootfs = Path(resolution["path"])
+        executable = rootfs / profile.binary.lstrip("/")
+        command = [emulator, "-strace", "-L", str(rootfs), str(executable), *profile.arguments]
+        result = self.runner.run(command, timeout=max(1, min(30, int(timeout_seconds))))
+        stderr = str(result.stderr or "")
+        stdout = str(result.stdout or "")
+        failure_category, deepest_reason = classify_runtime_trace(stderr, result.exit_code)
+        process_started = bool(re.search(r"^\s*\d+\s+[A-Za-z_][A-Za-z0-9_]*\(", stderr, flags=re.MULTILINE))
+        payload = {
+            "success": result.exit_code == 0 and failure_category is None,
+            "service": service,
+            "binary": profile.binary,
+            "architecture": mapping.architecture,
+            "endianness": mapping.endianness,
+            "emulator": mapping.emulator,
+            "loader_root": str(rootfs),
+            "rootfs_provenance": resolution,
+            "command": command,
+            "exit_code": result.exit_code,
+            "timed_out": result.timed_out,
+            "process_started": process_started,
+            "failure_category": failure_category,
+            "deepest_verified_blocker": deepest_reason,
+            "stdout": stdout[:4000],
+            "stderr": stderr[-16000:],
+        }
+        save_json(self._service_dir(service) / "startup_trace.json", payload)
+        return payload
 
     def prepare_service(self, service: str, *, force_reconstruct: bool = False) -> dict[str, Any]:
         rootfs = self._rootfs()
         if rootfs is None:
             return {"success": False, "errors": ["rootfs not available"]}
         profile = self._load_or_reconstruct_profile(service, force_reconstruct=force_reconstruct)
+        feasibility = self.inspect_runtime_feasibility(service)
+        assessment = feasibility.get("assessment") or {}
+        if assessment and not assessment.get("runtime_feasible"):
+            result = {
+                "success": False,
+                "diagnosis": "runtime_feasibility_blocked",
+                "failure_category": assessment.get("failure_category") or "dependency_missing",
+                "profile": profile.to_dict(),
+                "feasibility": assessment,
+                "blocking_reasons": assessment.get("blocking_reasons") or [],
+            }
+            save_json(self._service_dir(service) / "runtime.json", result)
+            return result
         dependencies = check_runtime_dependencies(rootfs, profile, self.runner)
         if dependencies.get("missing_paths") or dependencies.get("missing_libraries"):
             result = {
                 "success": False,
                 "diagnosis": "missing_runtime_dependency",
+                "failure_category": "shared_library_missing" if dependencies.get("missing_libraries") else "dependency_missing",
                 "profile": profile.to_dict(),
                 "dependencies": dependencies,
             }
@@ -389,11 +585,20 @@ class QemuUserServiceBackend(EmulationBackend):
                     "reason": "firmware lighttpd enables SSL and OpenSSL requires runtime entropy",
                     "source_evidence": profile.config_files,
                     "reversible": True,
+                    "original_environment_gap": "OpenSSL entropy seed path absent from temporary runtime copy",
+                    "files_modified": ["/etc/ssl/private/.rand"],
+                    "source_rootfs_modified": False,
+                    "runtime_copy_modified": True,
+                    "transport_changes": [],
+                    "environment_changes": {"RANDFILE": "/etc/ssl/private/.rand"},
+                    "original_startup_confirmed": False,
+                    "fidelity_limitations": ["entropy seed is generated by DeepDuck, not vendor startup"],
                 }
             )
-        qemu = shutil.which("qemu-arm-static")
+        mapping = self._runtime_mapping()
+        qemu = shutil.which(mapping.emulator) if mapping else None
         if qemu:
-            qemu_target = service_rootfs / "usr" / "bin" / "qemu-arm-static"
+            qemu_target = service_rootfs / "usr" / "bin" / mapping.emulator
             qemu_target.parent.mkdir(parents=True, exist_ok=True)
             shutil.copy2(qemu, qemu_target)
         result = {
@@ -403,10 +608,14 @@ class QemuUserServiceBackend(EmulationBackend):
             "dependencies": dependencies,
             "service_rootfs": str(service_rootfs),
             "repairs": repairs,
+            "runtime_mapping": mapping.to_dict() if mapping else None,
         }
         service_dir = self._service_dir(service)
         save_json(service_dir / "launch_profile.json", profile.to_dict())
-        save_json(service_dir / "runtime.json", result)
+        for repair in repairs:
+            repair_id = str(repair.get("id") or f"RR-{len(repairs):04d}")
+            save_json(service_dir / "repairs" / f"runtime_repair_{repair_id}.json", repair)
+        save_json(service_dir / "preparation.json", result)
         return result
 
     def start_service(
@@ -419,6 +628,18 @@ class QemuUserServiceBackend(EmulationBackend):
         prepared = self.prepare_service(service)
         if not prepared.get("success"):
             return prepared
+        prior_attempts = self._service_attempts(service)
+        repeated_stop = repeated_failure_stop_reason(prior_attempts)
+        if repeated_stop:
+            latest = prior_attempts[-1]
+            return {
+                "success": False,
+                "diagnosis": "repeated_no_progress_failure",
+                "failure_category": latest.get("failure_category") or "runtime_repair_insufficient",
+                "stop_reason": repeated_stop,
+                "attempt": latest,
+                "runtime_repairs": prepared.get("repairs") or [],
+            }
         profile = ServiceLaunchProfile(**prepared["profile"])
         service_dir = self._service_dir(service)
         stdout_path = service_dir / "stdout.log"
@@ -442,7 +663,10 @@ class QemuUserServiceBackend(EmulationBackend):
                 errors=[str(exc)],
             )
             save_json(service_dir / "runtime.json", state.to_dict())
-            return {"success": False, "state": state.to_dict(), "command": command}
+            result = {"success": False, "state": state.to_dict(), "command": command, "failure_category": "runtime_backend_unavailable"}
+            result["runtime_repairs"] = prepared.get("repairs") or []
+            result["attempt"] = self._record_service_attempt(service, result, binary=profile.binary)
+            return result
         self.service_processes[service] = process
         time.sleep(max(0, stability_seconds))
         exit_code = process.poll()
@@ -462,6 +686,8 @@ class QemuUserServiceBackend(EmulationBackend):
                 diagnosis="service_running",
             )
             result = {"success": True, "state": state.to_dict(), "command": command}
+            result["runtime_repairs"] = prepared.get("repairs") or []
+            result["attempt"] = self._record_service_attempt(service, result, binary=profile.binary)
         else:
             stdout.close()
             stderr.close()
@@ -478,7 +704,9 @@ class QemuUserServiceBackend(EmulationBackend):
                 diagnosis=diagnosis,
                 errors=[(stderr_text or stdout_text or "service exited")[-1000:]],
             )
-            result = {"success": False, "state": state.to_dict(), "command": command}
+            result = {"success": False, "state": state.to_dict(), "command": command, "failure_category": normalize_runtime_failure_category(diagnosis)}
+            result["runtime_repairs"] = prepared.get("repairs") or []
+            result["attempt"] = self._record_service_attempt(service, result, binary=profile.binary)
             if _allow_fastcgi_repair and diagnosis == "fastcgi_backend_failure":
                 repair = self._disable_lighttpd_fastcgi_backend(runtime_rootfs, profile)
                 if repair.get("success"):
@@ -546,16 +774,19 @@ class QemuUserServiceBackend(EmulationBackend):
             ports.append({"protocol": "tcp", "port": port, "state": "listening" if listening else "closed"})
         return {"success": any(item["state"] == "listening" for item in ports), "service": service, "ports": ports}
 
-    def probe_service_http(self, service: str) -> dict[str, Any]:
+    def probe_service_http(self, service: str, validation_input: dict[str, Any] | None = None) -> dict[str, Any]:
         profile = self._load_or_reconstruct_profile(service)
         if not profile.expected_ports:
             return {"success": False, "errors": ["service has no expected HTTP port"]}
         schemes = ["https", "http"] if profile.config.get("ssl.engine") == "enable" else ["http", "https"]
         errors = []
+        validation_input = validation_input or {"method": "GET", "path": "/"}
+        method = str(validation_input.get("method") or "GET").upper()
+        path = str(validation_input.get("path") or "/")
         for scheme in schemes:
-            url = f"{scheme}://127.0.0.1:{profile.expected_ports[0]}/"
+            url = f"{scheme}://127.0.0.1:{profile.expected_ports[0]}{path}"
             try:
-                result = probe_http(url)
+                result = probe_http(url, method=method)
             except Exception as exc:  # noqa: BLE001 - runtime probe is structured
                 errors.append(f"{url}: {exc}")
                 continue
@@ -582,6 +813,14 @@ class QemuUserServiceBackend(EmulationBackend):
             "source_evidence": [source_config, str(self._service_dir(profile.service) / "baseline_failure.json")],
             "reversible": True,
             "config_file": runtime_config,
+            "original_environment_gap": "configured FastCGI child is unavailable in the reconstructed runtime",
+            "files_modified": [runtime_config],
+            "source_rootfs_modified": False,
+            "runtime_copy_modified": True,
+            "transport_changes": ["FastCGI route omitted from this service-only reachability check"],
+            "environment_changes": {},
+            "original_startup_confirmed": False,
+            "fidelity_limitations": ["repaired lighttpd reachability is not stock application integration"],
         }
 
     def _external_fastcgi_runtime_repair(
@@ -622,6 +861,17 @@ class QemuUserServiceBackend(EmulationBackend):
                 source_config,
             ],
             reversible=True,
+            original_environment_gap="lighttpd-managed child lifecycle exits before FastCGI request handling",
+            files_modified=[runtime_config],
+            source_rootfs_modified=False,
+            runtime_copy_modified=True,
+            transport_changes=[
+                "FastCGI child lifecycle is externally managed",
+                "lighttpd reaches the firmware child through a loopback-only reconstructed FastCGI transport",
+            ],
+            environment_changes={},
+            original_startup_confirmed=False,
+            fidelity_limitations=["reconstructed lifecycle is not vendor-original startup"],
         ).to_dict()
         transport = "unix" if socket_guest else "tcp"
         repair.update(
@@ -649,7 +899,7 @@ class QemuUserServiceBackend(EmulationBackend):
             except subprocess.TimeoutExpired:
                 process.kill()
         state = ServiceRuntimeState(service=service, state="stopped")
-        save_json(self._service_dir(service) / "runtime.json", {"success": True, "state": state.to_dict()})
+        save_json(self._service_dir(service) / "stop.json", {"success": True, "state": state.to_dict()})
         return {"success": True, "service": service, "state": state.to_dict()}
 
     def get_boot_progress(self) -> dict[str, Any]:
@@ -1317,38 +1567,102 @@ class QemuUserServiceBackend(EmulationBackend):
     def stop(self) -> dict[str, Any]:
         for service in list(self.service_processes):
             self.stop_service(service)
-        self.runner.run(["pkill", "-f", "qemu-arm-static"], timeout=10)
-        return {"success": True}
+        return {"success": True, "managed_processes_only": True}
 
     def logs(self, limit: int = 200) -> list[str]:
         return []
 
     def check_environment(self) -> dict[str, Any]:
         caps = detect_capabilities()
+        mapping = self._runtime_mapping()
+        emulator = mapping.emulator if mapping else None
         return {
-            "success": shutil.which("qemu-arm-static") is not None,
+            "success": bool(emulator and shutil.which(emulator)),
             "capabilities": caps.to_dict(),
+            "runtime_mapping": mapping.to_dict() if mapping else None,
+            "emulator_path": shutil.which(emulator) if emulator else None,
+            "failure_category": None if emulator and shutil.which(emulator) else ("unsupported_architecture" if mapping is None else "emulator_unavailable"),
         }
 
     def _rootfs(self) -> Path | None:
         report = self.workspace.load_report()
-        extraction = report.get("extraction", {})
-        canonical = extraction.get("canonical_rootfs") or {}
-        candidates = [
-            extraction.get("rootfs"),
-            canonical.get("workspace_relative_path"),
-            canonical.get("path"),
-            canonical.get("host_path"),
-        ]
-        for candidate in candidates:
-            if not candidate:
-                continue
-            path = Path(str(candidate))
-            if not path.is_absolute():
-                path = self.workspace.task_dir / path
-            if path.is_dir():
-                return path
-        return None
+        resolution = resolve_runtime_rootfs(self.workspace.task_dir, report)
+        if not resolution.get("success") or resolution.get("degraded_provenance"):
+            return None
+        return Path(resolution["path"])
+
+    def _rootfs_artifact(self) -> dict[str, Any]:
+        path = self.workspace.task_dir / "artifacts" / "rootfs.json"
+        if not path.exists():
+            return {}
+        try:
+            return json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            return {}
+
+    def _runtime_mapping(self):
+        report = self.workspace.load_report()
+        artifact = self._rootfs_artifact()
+        platform = report.get("platform") or {}
+        architecture = artifact.get("architecture") or platform.get("architecture")
+        endianness = artifact.get("endianness") or platform.get("endianness")
+        if not architecture:
+            architecture = "arm"
+            endianness = "little"
+        return resolve_user_runtime_mapping(architecture, endianness)
+
+    def _blocked_attempt(self, failure_category: str, reason: str, binary: str) -> dict[str, Any]:
+        fingerprint = runtime_failure_fingerprint(failure_category, reason, backend=self.name, binary=binary)
+        attempt = RuntimeAttemptStatus(
+            status="blocked",
+            failure_category=failure_category,
+            short_reason=reason,
+            evidence_refs=[],
+            runtime_backend=self.name,
+            observation_level=1,
+            failure_fingerprint=fingerprint,
+        )
+        payload = {"success": False, "binary": binary, "attempt": attempt.to_dict()}
+        save_json(self.workspace.dynamic_dir / "runtime-smoke" / f"{Path(binary).name}.json", payload)
+        return payload
+
+    def _service_attempts(self, service: str) -> list[dict[str, Any]]:
+        path = self._service_dir(service) / "attempts.json"
+        if not path.exists():
+            return []
+        try:
+            payload = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            return []
+        return payload if isinstance(payload, list) else []
+
+    def _record_service_attempt(self, service: str, result: dict[str, Any], *, binary: str) -> dict[str, Any]:
+        state = result.get("state") or {}
+        success = bool(result.get("success"))
+        reason = str((state.get("errors") or [state.get("diagnosis") or result.get("diagnosis") or "service runtime attempt"])[0])
+        category = result.get("failure_category")
+        fingerprint = None if success else runtime_failure_fingerprint(category, reason, backend=self.name, binary=binary)
+        attempts = self._service_attempts(service)
+        repeated = sum(1 for item in attempts if fingerprint and item.get("failure_fingerprint") == fingerprint) + (1 if fingerprint else 0)
+        attempt = RuntimeAttemptStatus(
+            status="observed" if success else "blocked",
+            failure_category=category,
+            short_reason="service process remained alive after the bounded startup threshold" if success else reason[:500],
+            evidence_refs=[],
+            runtime_backend=self.name,
+            process_started=bool(state.get("pid")),
+            service_bound=False,
+            request_sent=False,
+            response_received=False,
+            observation_level=2 if state.get("pid") else 1,
+            failure_fingerprint=fingerprint,
+            repeated_failure_count=repeated,
+            stop_reason="same_failure_fingerprint_repeated" if fingerprint and repeated >= 2 else None,
+        ).to_dict()
+        attempts.append(attempt)
+        path = self._service_dir(service) / "attempts.json"
+        path.write_text(json.dumps(attempts, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+        return attempt
 
     def _service_dir(self, service: str) -> Path:
         path = self.workspace.dynamic_dir / "services" / service
@@ -1377,17 +1691,21 @@ class QemuUserServiceBackend(EmulationBackend):
         *,
         qemu_args: list[str] | None = None,
     ) -> list[str]:
+        mapping = self._runtime_mapping()
+        if mapping is None:
+            raise ValueError("unsupported runtime architecture/endian mapping")
+        emulator_path = f"/usr/bin/{mapping.emulator}"
         if shutil.which("proot"):
             command = ["proot", "-R", str(runtime_rootfs)]
             for device in ("/dev/urandom", "/dev/random"):
                 if Path(device).exists():
                     command.extend(["-b", f"{device}:{device}"])
-            command.extend(["/usr/bin/qemu-arm-static", *(qemu_args or []), profile.binary, *profile.arguments])
+            command.extend([emulator_path, *(qemu_args or []), profile.binary, *profile.arguments])
             return command
         return [
             "chroot",
             str(runtime_rootfs),
-            "/usr/bin/qemu-arm-static",
+            emulator_path,
             *(qemu_args or []),
             profile.binary,
             *profile.arguments,
@@ -1401,6 +1719,10 @@ class QemuUserServiceBackend(EmulationBackend):
         qemu_args: list[str] | None = None,
         cwd: str | None = None,
     ) -> list[str]:
+        mapping = self._runtime_mapping()
+        if mapping is None:
+            raise ValueError("unsupported runtime architecture/endian mapping")
+        emulator_path = f"/usr/bin/{mapping.emulator}"
         if shutil.which("proot"):
             proot = shutil.which("proot") or "proot"
             command = [proot, "-R", str(runtime_rootfs)]
@@ -1409,12 +1731,12 @@ class QemuUserServiceBackend(EmulationBackend):
             for device in ("/dev/urandom", "/dev/random"):
                 if Path(device).exists():
                     command.extend(["-b", f"{device}:{device}"])
-            command.extend(["/usr/bin/qemu-arm-static", *(qemu_args or []), binary])
+            command.extend([emulator_path, *(qemu_args or []), binary])
             return command
         return [
             "chroot",
             str(runtime_rootfs),
-            "/usr/bin/qemu-arm-static",
+            emulator_path,
             *(qemu_args or []),
             binary,
         ]

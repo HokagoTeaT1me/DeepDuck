@@ -13,7 +13,7 @@ from fwagent.config import Round2Config, load_round2_config
 from fwagent.dynamic.config import DynamicConfig, load_dynamic_config
 from fwagent.dynamic.correlation import ComponentGraphBuilder
 from fwagent.dynamic.investigation import InvestigationController
-from fwagent.dynamic.models import DynamicEvidence
+from fwagent.dynamic.models import DynamicEvidence, is_canonical_runtime_evidence
 from fwagent.dynamic.prioritization import HypothesisValidationScheduler
 from fwagent.dynamic.service import reconstruct_service_startup
 from fwagent.dynamic.surface import AttackSurfaceBuilder
@@ -1136,6 +1136,10 @@ class AnalysisPipelineController:
         findings = _load_json_if_exists(task_dir / "findings" / "findings.json")
         rootfs = _load_json_if_exists(task_dir / "artifacts" / "rootfs.json")
         extraction_artifact = _load_json_if_exists(task_dir / "artifacts" / "extraction.json")
+        runtime_summary = _load_json_if_exists(task_dir / "dynamic" / "runtime_summary.json")
+        dynamic_evidence = _load_json_if_exists(task_dir / "dynamic" / "evidence" / "evidence.json")
+        if not isinstance(dynamic_evidence, list):
+            dynamic_evidence = []
         filesystem = report.get("filesystem", {}) if isinstance(report.get("filesystem"), dict) else {}
         ghidra_scheduled = ghidra.get("selected_binary_count", 0)
         ghidra_real = ghidra.get("real_ghidra_count", 0)
@@ -1195,6 +1199,18 @@ class AnalysisPipelineController:
             "promoted_hypotheses": synthesis.get("promoted_count", 0),
             "findings": len(findings.get("findings", [])),
             "runtime_validations": stages["DYNAMIC_VALIDATION"].items_processed,
+            "dynamic_feasibility": runtime_summary.get("dynamic_feasibility", "not_assessed"),
+            "selected_dynamic_service": runtime_summary.get("selected_dynamic_service"),
+            "runtime_backend": runtime_summary.get("runtime_backend"),
+            "binary_smoke": runtime_summary.get("binary_smoke", "not_attempted"),
+            "process_started": bool(runtime_summary.get("process_started")),
+            "endpoint_established": bool(runtime_summary.get("endpoint_established")),
+            "request_sent": bool(runtime_summary.get("request_sent")),
+            "response_observed": bool(runtime_summary.get("response_observed")),
+            "runtime_repair_ids": runtime_summary.get("runtime_repair_ids") or [],
+            "real_dynamic_evidence": sum(1 for item in dynamic_evidence if is_canonical_runtime_evidence(item)),
+            "dynamic_status": runtime_summary.get("dynamic_status", "not_attempted"),
+            "runtime_failure_category": runtime_summary.get("failure_category"),
         }
 
     def _validation_gaps(self, task_id: str, stages: dict[str, PipelineStageResult]) -> list[str]:
